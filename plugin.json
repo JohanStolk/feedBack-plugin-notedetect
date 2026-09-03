@@ -1,8 +1,10 @@
 {
   "id": "note_detect",
   "name": "Note Detection",
-  "version": "1.32.0",
+  "version": "1.33.0",
   "private": false,
+  "scriptType": "module",
+  "minHost": "0.3.0-alpha.1",
   "script": "screen.js",
   "styles": "assets/plugin.css",
   "settings": {
