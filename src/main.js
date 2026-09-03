@@ -176,6 +176,15 @@
 // (got-feedback/feedBack-desktop#40). On desktop builds that still expose only
 // the legacy name, alias it so the feedBackDesktop reads below work on every
 // desktop in any release order. No-op in the browser and on the new bridge.
+import {
+    _ND_TUNING_BASS_4, _ND_TUNING_BASS_5, _ND_TUNING_BASS_6,
+    _ND_TUNING_GUITAR_6, _ND_TUNING_GUITAR_7, _ND_TUNING_GUITAR_8,
+    _ND_PITCH_NAMES,
+    _ndArrangementKindFromName, _ndStandardMidiFor,
+    _ndFreqToMidi, _ndMidiToName, _ndMidiFromStringFret, _ndMidiToStringFret,
+    _ndFoldOctaveCents, _ndNearestOctaveCents, _ndResolveDisplayFingering,
+    _ndNextPow2, _ndParabolicOffset,
+} from './pitch-math.js';
 try {
     if (typeof window !== 'undefined' && !window.feedBackDesktop && window.slopsmithDesktop) {
         window.feedBackDesktop = window.slopsmithDesktop;
@@ -443,12 +452,6 @@ function _ndVerifyParamsFor(arrangement) {
 // the standard low-E string. 8-string guitar adds a further low F#1
 // below that (a perfect fourth below B1), matching the most common
 // Ibanez/Schecter 8-string standard tuning.
-const _ND_TUNING_BASS_4 = [28, 33, 38, 43];                   // E1 A1 D2 G2
-const _ND_TUNING_BASS_5 = [23, 28, 33, 38, 43];               // B0 E1 A1 D2 G2
-const _ND_TUNING_BASS_6 = [23, 28, 33, 38, 43, 48];           // B0 E1 A1 D2 G2 C3
-const _ND_TUNING_GUITAR_6 = [40, 45, 50, 55, 59, 64];         // E2 A2 D3 G3 B3 E4
-const _ND_TUNING_GUITAR_7 = [35, 40, 45, 50, 55, 59, 64];     // B1 E2 A2 D3 G3 B3 E4
-const _ND_TUNING_GUITAR_8 = [30, 35, 40, 45, 50, 55, 59, 64]; // F#1 B1 E2 A2 D3 G3 B3 E4
 
 // Calibration-wizard instrument presets (standalone, no song to read tuning
 // from). Each maps to an arrangement + stringCount that _ndStandardMidiFor
@@ -462,19 +465,6 @@ const _CAL_WIZARD_INSTRUMENT_CONFIGS = [
     { id: 'guitar-8', label: '8-string guitar',        arrangement: 'guitar', stringCount: 8 },
 ];
 
-function _ndArrangementKindFromName(name) {
-    return /bass/i.test(String(name || '')) ? 'bass' : 'guitar';
-}
-
-function _ndStandardMidiFor(arrangement, stringCount) {
-    if (arrangement === 'bass') {
-        if (stringCount === 6) return _ND_TUNING_BASS_6;
-        return stringCount === 5 ? _ND_TUNING_BASS_5 : _ND_TUNING_BASS_4;
-    }
-    if (stringCount === 8) return _ND_TUNING_GUITAR_8;
-    if (stringCount === 7) return _ND_TUNING_GUITAR_7;
-    return _ND_TUNING_GUITAR_6;
-}
 
 // Stable fingerprint of the tuning context a verify target is scored under.
 // A (string, fret) only maps to a pitch under a specific arrangement + string
@@ -579,28 +569,6 @@ function _ndInferArrangementFromOpenMidis(openMidis, stringCount) {
 // tunings. No module-level mutable fallbacks — the factory closure passes
 // its own state in.
 
-function _ndFreqToMidi(freq) {
-    return 12 * Math.log2(freq / 440) + 69;
-}
-
-// MIDI → scientific pitch name (e.g. 40 → "E2"). Rounds to the nearest
-// semitone. Used by the HUD so the "detected note" label is correct
-// regardless of arrangement, tuning offsets, or capo — the previous
-// implementation hardcoded `['E2','A2','D3','G3','B3','E4']` indexed
-// by string, which mislabelled every bass / 7-string / retuned note.
-const _ND_PITCH_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-function _ndMidiToName(midi) {
-    const rounded = Math.round(midi);
-    const pc = ((rounded % 12) + 12) % 12;
-    const octave = Math.floor(rounded / 12) - 1;
-    return _ND_PITCH_NAMES[pc] + octave;
-}
-
-function _ndMidiFromStringFret(string, fret, arrangement, stringCount, offsets, capo) {
-    const base = _ndStandardMidiFor(arrangement, stringCount);
-    const offset = offsets && offsets[string] !== undefined ? offsets[string] : 0;
-    return base[string] + offset + (capo || 0) + fret;
-}
 
 function _ndClassifyTiming(timingErrorMs, timingThresholdMs, lateGraceMs) {
     if (!Number.isFinite(timingErrorMs)) return null;
@@ -1376,60 +1344,7 @@ function _ndMakeJudgment(opts) {
     };
 }
 
-function _ndMidiToStringFret(midiNote, arrangement, stringCount, offsets, capo) {
-    // Pure geometric fallback: walk strings 0..N and return the first position
-    // that matches the pitch. Used when there is no chart context available
-    // (player noodling between chart notes). When a chart note is in play,
-    // _ndResolveDisplayFingering picks the chart's (s, f) instead — see the
-    // research notes in mapping-bass.test.js.
-    const base = _ndStandardMidiFor(arrangement, stringCount);
-    let bestDist = Infinity;
-    let bestString = -1;
-    let bestFret = -1;
-    for (let s = 0; s < base.length; s++) {
-        const offset = offsets && offsets[s] !== undefined ? offsets[s] : 0;
-        const openMidi = base[s] + offset + (capo || 0);
-        const fret = Math.round(midiNote - openMidi);
-        if (fret < 0 || fret > 24) continue;
-        const dist = Math.abs(midiNote - (openMidi + fret));
-        if (dist < bestDist) {
-            bestDist = dist;
-            bestString = s;
-            bestFret = fret;
-        }
-    }
-    return { string: bestString, fret: bestFret };
-}
 
-function _ndFoldOctaveCents(cents) {
-    if (!Number.isFinite(cents)) return Infinity;
-    return cents - (Math.round(cents / 1200) * 1200);
-}
-
-function _ndNearestOctaveCents(detectedMidi, expectedMidi) {
-    if (!Number.isFinite(detectedMidi) || !Number.isFinite(expectedMidi)) return Infinity;
-    return _ndFoldOctaveCents((detectedMidi - expectedMidi) * 100);
-}
-
-// Chart-context-aware fingering resolver. If any candidate chart note's
-// expected pitch is within the pitch tolerance of the detected MIDI (allowing
-// whole-octave detector mistakes), return that note's (string, fret) — the
-// player is hitting the charted fingering. Otherwise fall back to the
-// geometric first-match on the arrangement's tuning. This mirrors what
-// score-follower apps (e.g. the chart) do: trust the chart for display when
-// the player is on-pitch, only guess when they aren't.
-function _ndResolveDisplayFingering(detectedMidi, candidateNotes, arrangement, stringCount, offsets, capo, pitchToleranceCents) {
-    if (candidateNotes && candidateNotes.length > 0) {
-        for (const cn of candidateNotes) {
-            const expected = _ndMidiFromStringFret(cn.s, cn.f, arrangement, stringCount, offsets, capo);
-            if (Math.abs(_ndNearestOctaveCents(detectedMidi, expected)) <= pitchToleranceCents) {
-                return { string: cn.s, fret: cn.f, displayMidi: expected };
-            }
-        }
-    }
-    const fallback = _ndMidiToStringFret(detectedMidi, arrangement, stringCount, offsets, capo);
-    return { string: fallback.string, fret: fallback.fret, displayMidi: detectedMidi };
-}
 
 // ── Pitch Detection: YIN ───────────────────────────────────────────────────
 // Lightweight monophonic pitch detector — works instantly, no model to load.
@@ -1493,13 +1408,6 @@ function _ndYinDetect(buffer, sampleRate, minFreqHz = _ND_MIN_DETECTABLE_HZ) {
 // ~80 lines of dependency-free JS to preserve notedetect's zero-deps
 // principle.
 
-// Next power-of-two ≥ n. FFT sizes must be powers of two; the input
-// buffer is zero-padded up to this length before transforming.
-function _ndNextPow2(n) {
-    let p = 1;
-    while (p < n) p <<= 1;
-    return p;
-}
 
 // Minimum samples to accumulate before a single-note detection frame. Guitar
 // keeps the proven _ND_MIN_YIN_SAMPLES (4096). Bass must span ~2 periods of
@@ -1682,14 +1590,6 @@ function _ndFftMagnitude(buffer, sampleRate) {
 // offset `delta` in [-1, 1] that refines the peak location. Clamps to
 // ±1 so a near-zero denom can't produce a runaway offset that lands the
 // corrected peak in a neighboring bin.
-function _ndParabolicOffset(yPrev, yPeak, yNext) {
-    const denom = yPrev - 2 * yPeak + yNext;
-    if (Math.abs(denom) < 1e-12) return 0;
-    const delta = 0.5 * (yPrev - yNext) / denom;
-    if (delta > 1) return 1;
-    if (delta < -1) return -1;
-    return delta;
-}
 
 // ── Pitch Detection: HPS (Harmonic Product Spectrum) ───────────────────────
 // Frequency-domain detector designed for bass signals with a suppressed

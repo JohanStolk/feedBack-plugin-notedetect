@@ -184,8 +184,8 @@ function _loadImportsIntoSandbox(src, srcDir, sandbox, depth = 0) {
         depSrc = depSrc
             .replace(/^export\s+((?:function|const|let|var|class)\b)/gm, '$1')
             .replace(/^export\s+default\s+/gm, '')
-            // Strip any remaining import lines the dep itself has.
-            .replace(/^import\s+.*?from\s+['"][^'"]+['"]\s*;?\s*$/gm, '');
+            // Strip any remaining import lines the dep itself has (including multiline).
+            .replace(/^import\s+\{[^}]*\}\s+from\s+['"][^'"]+['"]\s*;?\s*\n?/gm, '');
         try {
             vm.runInContext(depSrc, sandbox, { filename: path.basename(depPath) });
         } catch (err) {
@@ -209,7 +209,11 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
     // Pre-load any sub-modules imported by main.js into the sandbox,
     // then strip their import declarations so the classic-script vm run works.
     _loadImportsIntoSandbox(src, path.dirname(SCRIPT_PATH), sandbox);
-    src = src.replace(/^import\s+.*?from\s+['"][^'"]+['"]\s*;?\s*$/gm, '');
+    // Strip both single-line `import { a } from '...'` and multi-line
+    // `import {\n  a, b\n} from '...'` declarations. [^}]* matches
+    // across newlines (any char except `}`), so the pattern is the same
+    // as the detection regex above and handles both forms.
+    src = src.replace(/^import\s+\{[^}]*\}\s+from\s+['"][^'"]+['"]\s*;?\s*\n?/gm, '');
     // Script may throw while executing setup code that touches DOM edge cases —
     // function declarations at top level still get hoisted onto the sandbox
     // before any thrown error, so we swallow the throw and grab what we need.
