@@ -17,9 +17,11 @@ test('src/main.js parses as a valid ES module (no duplicate top-level declaratio
     const mainJs = path.join(__dirname, '..', 'src', 'main.js');
     const result = spawnSync(
         process.execPath,
-        ['--input-type=module', '--check'],
+        ['--input-type=module', '--check', '-'],
         { input: require('node:fs').readFileSync(mainJs), encoding: 'utf8' },
     );
+    assert.equal(result.error, undefined,
+        'spawnSync failed to launch node: ' + (result.error || ''));
     assert.equal(
         result.status, 0,
         'src/main.js failed ES-module parse check — likely a duplicate top-level declaration:\n'
