@@ -273,7 +273,9 @@ test('renderResultsCard degrades to null with no 2D canvas (headless), no throw'
 // backdrop-dismiss handler isn't reintroduced. Exit stays explicit: the
 // Exit Song / Retry / Return to Previous buttons.
 test('results overlay does not dismiss/leave the song on a backdrop click', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+    // nd-carve-5 cut 2: overlay creation moved to summary-ui.js; scan both files.
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8')
+        + '\n' + fs.readFileSync(path.join(__dirname, '..', 'src', 'summary-ui.js'), 'utf8');
     assert.doesNotMatch(
         src,
         /overlay\.onclick\s*=[^\n]*_ndDismissSummary/,
