@@ -9,7 +9,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+// showSummary and queue-wiring helpers moved to summary-ui.js (nd-carve-5 cut 2);
+// combine both files so source-shape patterns still resolve.
+const SRC = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8')
+    + '\n' + fs.readFileSync(path.join(__dirname, '..', 'src', 'summary-ui.js'), 'utf8')
+        .replace(/^export /gm, '').replace(/^import[^\n]*\n/gm, '');
 
 test('advance path drops the auto-exit hold and calls playQueue.advance()', () => {
     // The block must exist…

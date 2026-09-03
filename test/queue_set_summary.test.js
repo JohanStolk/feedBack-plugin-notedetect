@@ -9,7 +9,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
+// showSummary and helpers moved to summary-ui.js (nd-carve-5 cut 2); include
+// it alongside main.js so source-shape patterns still resolve.
 const SRC = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8')
+    + '\n' + fs.readFileSync(path.join(__dirname, '..', 'src', 'summary-ui.js'), 'utf8')
+        .replace(/^export /gm, '').replace(/^import[^\n]*\n/gm, '')
     + '\n' + fs.readFileSync(path.join(__dirname, '..', 'src', 'set-math.js'), 'utf8')
         .replace(/^export /gm, '');
 
@@ -109,7 +113,8 @@ test('queue display toggles: default on, "0" = off, junk = on', () => {
 // ── wiring contracts (source-level pins) ──────────────────────────────────────
 
 test('the set log records only the NATURAL song end (claimAutoExit)', () => {
-    const i = SRC.indexOf('_ndSetLog = _ndSetLogAppend(_ndSetLog,');
+    // nd-carve-5 cut 2: _ndSetLog is module-level; read/write via getSetLog()/setSetLog().
+    const i = SRC.indexOf('setSetLog(_ndSetLogAppend(_ndSetLog,');
     assert.ok(i !== -1, 'append site present');
     // The guard sits just above the append — a manual/forced re-show of the
     // card must never double-count a song.
@@ -122,15 +127,17 @@ test('set summary requires: last song + toggle + at least two entries', () => {
     assert.ok(i !== -1);
     const block = SRC.slice(i, i + 250);
     assert.match(block, /!_ndQueueNext/);
-    assert.match(block, /_ndQueueSetSummaryEnabled\(\)/);
-    assert.match(block, /_ndSetLog\.length >= 2/);
+    // nd-carve-5 cut 2: _ndQueueSetSummaryEnabled/getSetLog via DI params.
+    assert.match(block, /ndQueueSetSummaryEnabled\(\)/);
+    assert.match(block, /getSetLog\(\)\.length >= 2/);
 });
 
 test('summary Exit retires the log and clears the queue before dismissing', () => {
     const i = SRC.indexOf('if (exitBtn) exitBtn.onclick = () => {');
     assert.ok(i !== -1, 'summary exit wiring present');
     const block = SRC.slice(i, i + 300);
-    const log = block.indexOf('_ndSetLog = []');
+    // nd-carve-5 cut 2: _ndSetLog write via setSetLog() DI accessor.
+    const log = block.indexOf('setSetLog([])');
     const clear = block.indexOf('_ndQueue.clear()');
     const dismiss = block.indexOf('_ndDismissSummary(true)');
     assert.ok(log !== -1 && clear !== -1 && dismiss !== -1);
@@ -142,13 +149,15 @@ test('last-song Exit retires the log even without viewing the summary', () => {
     const i = SRC.indexOf('if (_ndSetDone) {\n            const setsumBtn');
     assert.ok(i !== -1, 'set-done wiring present');
     const block = SRC.slice(i, i + 500);
-    assert.ok(block.indexOf('_ndSetLog = []') !== -1
-        && block.indexOf('_ndSetLog = []') < block.indexOf('_ndDismissSummary(true)'));
+    // nd-carve-5 cut 2: _ndSetLog write via setSetLog() DI accessor.
+    assert.ok(block.indexOf('setSetLog([])') !== -1
+        && block.indexOf('setSetLog([])') < block.indexOf('_ndDismissSummary(true)'));
 });
 
 test('scores-off summary swap happens AFTER the auto-exit hold is claimed', () => {
     const hold = SRC.indexOf('window.slopsmith.holdAutoExit()');
-    const swap = SRC.indexOf('if (_ndSetDone && !_ndQueueShowScores()) _ndRenderSetSummary()');
+    // nd-carve-5 cut 2: _ndQueueShowScores → ndQueueShowScores DI param.
+    const swap = SRC.indexOf('if (_ndSetDone && !ndQueueShowScores()) _ndRenderSetSummary()');
     assert.ok(hold !== -1 && swap !== -1);
     assert.ok(swap > hold,
         'the summary relies on the same deferred return the card claims');
