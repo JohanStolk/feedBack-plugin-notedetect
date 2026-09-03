@@ -14,12 +14,13 @@ import { _ndIsStreakMilestone } from './classify.js';
 const DRILL_LOOP_POLL_MS = 1000;
 
 /**
- * createHUD({ hw, instanceRoot, loadSkin, noteKey, noteStateFor, getState,
+ * createHUD({ instanceRoot, loadSkin, noteKey, noteStateFor, getState,
  *             drillCallbacks })
  *
  * drillCallbacks: { syncFromLoopState, conductorTick, render }
  *
  * getState() returns a snapshot of factory-level scoring/detection/settings:
+ *   hw (live resolveHw() result — may be null before highway installs),
  *   enabled, hits, misses, streak, bestStreak, score, multiplier,
  *   detectedString, detectedConfidence, detectedDisplayMidi, detectedMidi,
  *   detectedFret, lastChordScore, lastChordHit, lastChordTotal, lastChordTime,
@@ -30,7 +31,6 @@ const DRILL_LOOP_POLL_MS = 1000;
  * Returns: { startHUD, stopHUD, drawOverlay }
  */
 export function createHUD({
-    hw,
     instanceRoot,
     loadSkin,
     noteKey,
@@ -49,15 +49,17 @@ export function createHUD({
     let drillLoopPollLastMs = 0;
 
     // Thin hw wrappers — avoids injecting factory-level _ndChartNotes/_ndChartChords.
-    function _chartNotes() {
-        if (!hw) return [];
-        if (typeof hw.getFilteredNotes === 'function') return hw.getFilteredNotes() || [];
-        return (hw.getNotes && hw.getNotes()) || [];
+    // hwRef is passed explicitly (not closed over) so callers always use a live
+    // resolveHw() result from getState(), never a stale construction-time capture.
+    function _chartNotes(hwRef) {
+        if (!hwRef) return [];
+        if (typeof hwRef.getFilteredNotes === 'function') return hwRef.getFilteredNotes() || [];
+        return (hwRef.getNotes && hwRef.getNotes()) || [];
     }
-    function _chartChords() {
-        if (!hw) return [];
-        if (typeof hw.getFilteredChords === 'function') return hw.getFilteredChords() || [];
-        return (hw.getChords && hw.getChords()) || [];
+    function _chartChords(hwRef) {
+        if (!hwRef) return [];
+        if (typeof hwRef.getFilteredChords === 'function') return hwRef.getFilteredChords() || [];
+        return (hwRef.getChords && hwRef.getChords()) || [];
     }
 
     function createHUDDom() {
@@ -138,6 +140,7 @@ export function createHUD({
 
     function updateHUD() {
         const {
+            hw,
             enabled, hits, misses, streak, bestStreak, score, multiplier,
             detectedString, detectedConfidence, detectedDisplayMidi, detectedMidi, detectedFret,
             lastChordScore, lastChordHit, lastChordTotal, lastChordTime,
@@ -248,8 +251,8 @@ export function createHUD({
                 // show it for a short TTL after the chord's chart time
                 // so the readout doesn't linger forever through silence
                 // / noise between notes.
-                const songTime = (hw.getTime ? hw.getTime() : 0) - latencyOffset
-                    + (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
+                const songTime = (hw && hw.getTime ? hw.getTime() : 0) - latencyOffset
+                    + (hw && hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
                 const CHORD_HUD_TTL_SEC = 1.5;
                 if (songTime - lastChordTime <= CHORD_HUD_TTL_SEC) {
                     const pct = Math.round(lastChordScore * 100);
@@ -294,6 +297,7 @@ export function createHUD({
     // ── Draw hook overlay on the highway canvas ───────────────────────
     function drawOverlay(ctx, W, H) {
         const {
+            hw,
             enabled, detectedString, detectedConfidence, detectedFret,
             detectionConfidenceMin, detectedDisplayMidi, detectedMidi,
             missMarkerDuration, hitGlowDuration,
@@ -301,7 +305,7 @@ export function createHUD({
             noteResults,
         } = getState();
         if (!enabled) return;
-        if (!hw.project || !hw.fretX) return;
+        if (!hw || !hw.project || !hw.fretX) return;
         // This overlay positions everything with the 2D highway's
         // projection (hw.project / hw.fretX). A custom renderer (3D
         // highway, piano, …) draws its own scene with different
@@ -317,8 +321,8 @@ export function createHUD({
 
         const t = hw.getTime();
         const renderT = t + (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
-        const notes = _chartNotes();
-        const chords = _chartChords();
+        const notes = _chartNotes(hw);
+        const chords = _chartChords(hw);
 
         const drawTextReadable = (text, x, y) => {
             if (hw.fillTextUnmirrored) hw.fillTextUnmirrored(text, x, y);

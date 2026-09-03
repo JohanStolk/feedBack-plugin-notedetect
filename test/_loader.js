@@ -420,6 +420,10 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
         // stub directly (e.g., make hw.getTime return non-zero so
         // drillIterStartT comes out non-null).
         highway: sandbox.highway,
+        // Direct reference to the vm sandbox — tests that need to mutate
+        // sandbox state AFTER load (e.g. install window.highway when it
+        // was null at load time to test lazy resolution) use this.
+        _sandbox: sandbox,
     };
 }
 

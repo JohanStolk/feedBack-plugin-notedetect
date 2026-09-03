@@ -3236,12 +3236,12 @@ function createNoteDetector(options = {}) {
     // closure imports. drillCallbacks are function-declaration hoists — safe
     // to reference before their textual declaration.
     const _hud = createHUD({
-        hw,
         instanceRoot,
         loadSkin: _ndLoadSkin,
         noteKey,
         noteStateFor,
         getState: () => ({
+            hw: resolveHw(),
             enabled,
             hits, misses, streak, bestStreak, score, multiplier,
             detectedString, detectedConfidence, detectedDisplayMidi, detectedMidi, detectedFret,
