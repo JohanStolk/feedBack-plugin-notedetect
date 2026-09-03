@@ -10,7 +10,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const SCRIPT_PATH = path.join(__dirname, '..', 'screen.js');
+const SCRIPT_PATH = path.join(__dirname, '..', 'src', 'main.js');
 
 function makeSandbox() {
     const noop = () => {};

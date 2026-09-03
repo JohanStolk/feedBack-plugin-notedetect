@@ -24,7 +24,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'screen.js'), 'utf8');
+const SRC = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
 
 function extractBlock(src, signature) {
     const start = src.indexOf(signature);

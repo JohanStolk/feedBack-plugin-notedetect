@@ -319,7 +319,7 @@ test('a song with no phrase data still ships the full chart as its label', () =>
 // a scoring path that reads the raw chart directly is the whole bug, so no new
 // one may appear. The allowlist is the reads that are deliberately NOT scoring.
 test('no scoring path reads the unfiltered chart directly', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'screen.js'), 'utf8');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
     const ALLOWED = [
         // Test hook: reports the RAW chart size, on purpose.
         '_calDebug:',

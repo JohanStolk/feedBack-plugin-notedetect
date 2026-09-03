@@ -46,14 +46,14 @@ test('plugin.json, package.json, and screen.js _ND_VERSION are all in sync', () 
         `plugin.json is the source of truth — update package.json to match.`,
     );
 
-    // Find _ND_VERSION in screen.js. Scoped to the exact declaration
+    // Find _ND_VERSION in src/main.js. Scoped to the exact declaration
     // line so a stray reference in a comment can't satisfy the test.
-    const screen = fs.readFileSync(path.join(PLUGIN_DIR, 'screen.js'), 'utf8');
+    const screen = fs.readFileSync(path.join(PLUGIN_DIR, 'src', 'main.js'), 'utf8');
     const m = screen.match(/^\s*const\s+_ND_VERSION\s*=\s*['"]([^'"]+)['"]/m);
-    assert.ok(m, 'screen.js must declare `const _ND_VERSION = "..."`');
+    assert.ok(m, 'src/main.js must declare `const _ND_VERSION = "..."`');
     assert.strictEqual(
         m[1], canonical,
-        `screen.js _ND_VERSION (${m[1]}) does not match plugin.json (${canonical}). ` +
-        `plugin.json is the source of truth — update _ND_VERSION in screen.js to match.`,
+        `src/main.js _ND_VERSION (${m[1]}) does not match plugin.json (${canonical}). ` +
+        `plugin.json is the source of truth — update _ND_VERSION in src/main.js to match.`,
     );
 });
