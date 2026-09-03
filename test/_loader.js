@@ -1,10 +1,14 @@
 // Load screen.js into a Node vm context with minimal DOM/browser stubs
 // so pure detection functions can be exercised by tests without a browser.
 //
-// Rationale: screen.js is shipped as a single browser script (no module exports).
-// Copy-pasting its functions into a test module would drift. This loader runs
-// the real script against stubs and pulls the named top-level function
-// declarations off the sandbox.
+// Rationale: src/main.js is an ES module but the vm context runs classic-
+// script mode. When main.js gains `import` declarations (leaf-extraction
+// steps), _loadImportsIntoSandbox handles them: it reads each imported
+// file, strips `export` keywords so the functions become plain declarations,
+// and runs the file in the sandbox BEFORE main.js so every imported name is
+// already a global by the time main.js executes. Import lines are then
+// stripped from main.js's source before vm.runInContext. Recursive up to 4
+// levels deep (handles transitive module deps without infinite loops).
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -161,8 +165,37 @@ function makeSandbox() {
     return sandbox;
 }
 
+// Pre-load ES-module sub-files imported by main.js into a vm sandbox so the
+// classic-script vm run can still access everything. Strips `export` keyword
+// so named exports become plain declarations; strips import lines so they
+// don't re-trigger recursion. Depth-limited to avoid infinite loops.
+function _loadImportsIntoSandbox(src, srcDir, sandbox, depth = 0) {
+    if (depth > 4) return;
+    const importRe = /^import\s+\{[^}]*\}\s+from\s+['"]([^'"]+)['"]\s*;?\s*$/gm;
+    let match;
+    while ((match = importRe.exec(src)) !== null) {
+        const depPath = path.resolve(srcDir, match[1]);
+        let depSrc;
+        try { depSrc = fs.readFileSync(depPath, 'utf8'); }
+        catch (_) { continue; } // missing dep → let main.js error naturally
+        // Recurse first so transitive deps are defined before this file runs.
+        _loadImportsIntoSandbox(depSrc, path.dirname(depPath), sandbox, depth + 1);
+        // Strip ES module syntax: `export function f` → `function f`, etc.
+        depSrc = depSrc
+            .replace(/^export\s+((?:function|const|let|var|class)\b)/gm, '$1')
+            .replace(/^export\s+default\s+/gm, '')
+            // Strip any remaining import lines the dep itself has.
+            .replace(/^import\s+.*?from\s+['"][^'"]+['"]\s*;?\s*$/gm, '');
+        try {
+            vm.runInContext(depSrc, sandbox, { filename: path.basename(depPath) });
+        } catch (err) {
+            if (process.env.TEST_DEBUG) console.error('[loader] sub-module threw:', path.basename(depPath), err.message);
+        }
+    }
+}
+
 function loadDetectionCore({ sandboxBeforeRun } = {}) {
-    const src = fs.readFileSync(SCRIPT_PATH, 'utf8');
+    let src = fs.readFileSync(SCRIPT_PATH, 'utf8');
     const sandbox = makeSandbox();
     // Hook for tests that need to inject globals before the plugin's
     // top-level code runs (e.g. window.feedBackDesktop for the desktop
@@ -173,6 +206,10 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
         sandboxBeforeRun(sandbox);
     }
     vm.createContext(sandbox);
+    // Pre-load any sub-modules imported by main.js into the sandbox,
+    // then strip their import declarations so the classic-script vm run works.
+    _loadImportsIntoSandbox(src, path.dirname(SCRIPT_PATH), sandbox);
+    src = src.replace(/^import\s+.*?from\s+['"][^'"]+['"]\s*;?\s*$/gm, '');
     // Script may throw while executing setup code that touches DOM edge cases —
     // function declarations at top level still get hoisted onto the sandbox
     // before any thrown error, so we swallow the throw and grab what we need.
