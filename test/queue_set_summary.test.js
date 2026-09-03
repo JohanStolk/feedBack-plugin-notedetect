@@ -9,7 +9,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+const SRC = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8')
+    + '\n' + fs.readFileSync(path.join(__dirname, '..', 'src', 'set-math.js'), 'utf8')
+        .replace(/^export /gm, '');
 
 function extract(name, globals) {
     const m = SRC.match(new RegExp('function ' + name + '\\([^)]*\\) \\{[\\s\\S]*?\\n\\}'));

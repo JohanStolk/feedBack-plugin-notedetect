@@ -206,6 +206,7 @@ import {
     _ND_MIN_DETECTABLE_HZ,
     _ndFftMagnitude, _ndHpsDetect,
 } from './dsp.js';
+import { _ndSetLogAppend, _ndSetLogAverage } from './set-math.js';
 try {
     if (typeof window !== 'undefined' && !window.feedBackDesktop && window.slopsmithDesktop) {
         window.feedBackDesktop = window.slopsmithDesktop;
@@ -706,30 +707,6 @@ function _ndQueueSetSummaryEnabled() {
 // hits, misses} — consumed by the end-of-set summary card after the last
 // song. Module-level: one queue plays at a time.
 let _ndSetLog = [];
-
-// Pure append-or-restart: a fresh set (first entry, a different queue
-// length, or a position that doesn't advance the log) RESTARTS the log —
-// that's how a new "Play All" run is detected without a queue session id.
-// Positions may skip forward (a queued song with too few scored notes
-// never cards, so it never logs); they just have to advance.
-function _ndSetLogAppend(log, entry) {
-    if (!entry || !Number.isFinite(entry.pos)) return log;
-    const last = log.length ? log[log.length - 1] : null;
-    if (!last || entry.total !== last.total || entry.pos <= last.pos) return [entry];
-    // A replay of the just-logged song re-fires the natural-end log — Retry /
-    // Practice on the FINAL queued card infers pos = prev.pos + 1 (no peekNext
-    // to anchor it), which would otherwise append a phantom entry and inflate
-    // the set. Same file as the last logged song within a set → never re-count.
-    // (Checked only in the append branch, so a genuine new run whose first song
-    // equals the previous set's last song still restarts above.)
-    if (entry.filename && entry.filename === last.filename) return log;
-    return log.concat([entry]);
-}
-
-function _ndSetLogAverage(log) {
-    if (!log || !log.length) return 0;
-    return Math.round(log.reduce((s, e) => s + (e.accuracy || 0), 0) / log.length);
-}
 
 // Personal-best store for the "beat your best" delta — one localStorage map
 // keyed by song+arrangement, holding the field-wise best run seen. Always on
