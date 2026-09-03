@@ -275,17 +275,6 @@ function _ndFilenameLooksDiagnostic(fn) {
 }
 
 // Escape untrusted text before interpolating into an innerHTML string.
-// Used for values that can carry markup metacharacters (e.g. engine/device
-// error messages surfaced in the calibration wizard).
-function _ndEscapeHtml(s) {
-    return String(s == null ? '' : s)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
-
 function _ndClearDiagnosticReturnState() {
     const r = _ndShared.diagnosticReturn;
     if (!r) return;
