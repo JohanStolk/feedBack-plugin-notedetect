@@ -171,25 +171,47 @@ function makeSandbox() {
 // don't re-trigger recursion. Depth-limited to avoid infinite loops.
 function _loadImportsIntoSandbox(src, srcDir, sandbox, depth = 0) {
     if (depth > 4) return;
-    const importRe = /^import\s+\{[^}]*\}\s+from\s+['"]([^'"]+)['"]\s*;?\s*$/gm;
+    // Capture the named-binding list ({…}) AND the module specifier separately
+    // so we can inject ONLY the named imports into the caller's sandbox.
+    const importRe = /^import\s+\{([^}]*)\}\s+from\s+['"]([^'"]+)['"]\s*;?\s*$/gm;
     let match;
     while ((match = importRe.exec(src)) !== null) {
-        const depPath = path.resolve(srcDir, match[1]);
+        // Parse "a, b as c, d" → [{exported:'a',local:'a'}, {exported:'b',local:'c'}, …]
+        const namedBindings = match[1].split(',')
+            .map(b => b.trim()).filter(Boolean)
+            .map(b => {
+                const m = /^(\S+)\s+as\s+(\S+)$/.exec(b);
+                return m ? { exported: m[1], local: m[2] } : { exported: b, local: b };
+            });
+        const depPath = path.resolve(srcDir, match[2]);
         let depSrc;
         try { depSrc = fs.readFileSync(depPath, 'utf8'); }
         catch (_) { continue; } // missing dep → let main.js error naturally
-        // Recurse first so transitive deps are defined before this file runs.
-        _loadImportsIntoSandbox(depSrc, path.dirname(depPath), sandbox, depth + 1);
-        // Strip ES module syntax: `export function f` → `function f`, etc.
-        depSrc = depSrc
+        // Run dep in a temp context (snapshot of current sandbox) so private
+        // (non-exported) helpers stay accessible to the exported functions
+        // via their lexical scope without leaking into the real sandbox.
+        // Named bindings are copied selectively: a dropped import → symbol
+        // absent from sandbox → red test, mirroring real ESM ReferenceError.
+        const tempCtx = vm.createContext({ ...sandbox });
+        _loadImportsIntoSandbox(depSrc, path.dirname(depPath), tempCtx, depth + 1);
+        const strippedSrc = depSrc
             .replace(/^export\s+((?:function|const|let|var|class)\b)/gm, '$1')
             .replace(/^export\s+default\s+/gm, '')
-            // Strip any remaining import lines the dep itself has (including multiline).
             .replace(/^import\s+\{[^}]*\}\s+from\s+['"][^'"]+['"]\s*;?\s*\n?/gm, '');
         try {
-            vm.runInContext(depSrc, sandbox, { filename: path.basename(depPath) });
+            vm.runInContext(strippedSrc, tempCtx, { filename: path.basename(depPath) });
         } catch (err) {
             if (process.env.TEST_DEBUG) console.error('[loader] sub-module threw:', path.basename(depPath), err.message);
+        }
+        // Read each named binding via runInContext so that const/let (NOT own
+        // properties of the context object, unlike var/function, but still
+        // accessible to subsequent scripts in the same context) are captured
+        // alongside function declarations. Object-literal wrap distinguishes
+        // "defined as 0/false/null" from "not defined" without a try/catch.
+        for (const { exported, local } of namedBindings) {
+            try {
+                sandbox[local] = vm.runInContext(`({v:${exported}})`, tempCtx).v;
+            } catch (_) { /* symbol absent from dep — drop, let main.js error naturally */ }
         }
     }
 }
