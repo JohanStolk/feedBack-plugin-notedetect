@@ -23,12 +23,11 @@ test('src/main.js parses as a valid ES module (no duplicate top-level declaratio
     try {
         fs.writeFileSync(tmpFile, fs.readFileSync(mainJs));
         const result = spawnSync(process.execPath, ['--check', tmpFile]);
-        assert.equal(result.error, undefined,
-            'spawnSync failed to launch node: ' + (result.error || ''));
         assert.equal(
             result.status, 0,
             'src/main.js failed ES-module parse check — likely a duplicate top-level declaration:\n'
-                + (result.stderr || '').toString().trim(),
+                + (result.stderr || '').toString().trim()
+                + (result.error ? '\nspawn error: ' + String(result.error) : ''),
         );
     } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
