@@ -169,7 +169,15 @@ function makeSandbox() {
 // classic-script vm run can still access everything. Strips `export` keyword
 // so named exports become plain declarations; strips import lines so they
 // don't re-trigger recursion. Depth-limited to avoid infinite loops.
-function _loadImportsIntoSandbox(src, srcDir, sandbox, depth = 0) {
+//
+// pristineBase — snapshot of the sandbox BEFORE any leaf injections. Each
+// leaf's temp context is seeded from this pristine base rather than the
+// accumulated sandbox, so a symbol injected by a sibling leaf cannot hide a
+// missing import in this leaf's own declaration (real ESM would throw
+// ReferenceError; a snapshot of the live sandbox would silently find it).
+// Passed unchanged through all recursive levels so transitive deps also
+// start clean.
+function _loadImportsIntoSandbox(src, srcDir, sandbox, depth = 0, pristineBase = null) {
     if (depth > 4) return;
     // Capture the named-binding list ({…}) AND the module specifier separately
     // so we can inject ONLY the named imports into the caller's sandbox.
@@ -187,13 +195,15 @@ function _loadImportsIntoSandbox(src, srcDir, sandbox, depth = 0) {
         let depSrc;
         try { depSrc = fs.readFileSync(depPath, 'utf8'); }
         catch (_) { continue; } // missing dep → let main.js error naturally
-        // Run dep in a temp context (snapshot of current sandbox) so private
-        // (non-exported) helpers stay accessible to the exported functions
-        // via their lexical scope without leaking into the real sandbox.
-        // Named bindings are copied selectively: a dropped import → symbol
-        // absent from sandbox → red test, mirroring real ESM ReferenceError.
-        const tempCtx = vm.createContext({ ...sandbox });
-        _loadImportsIntoSandbox(depSrc, path.dirname(depPath), tempCtx, depth + 1);
+        // Run dep in a temp context seeded from the PRISTINE base (not the
+        // accumulated sandbox) so private (non-exported) helpers stay
+        // accessible to exported functions via lexical scope without leaking
+        // into the real sandbox. Named bindings are copied selectively: a
+        // dropped import → symbol absent from sandbox → red test, mirroring
+        // real ESM ReferenceError.
+        const base = pristineBase ?? sandbox;
+        const tempCtx = vm.createContext({ ...base });
+        _loadImportsIntoSandbox(depSrc, path.dirname(depPath), tempCtx, depth + 1, base);
         const strippedSrc = depSrc
             .replace(/^export\s+((?:function|const|let|var|class)\b)/gm, '$1')
             .replace(/^export\s+default\s+/gm, '')
@@ -228,9 +238,13 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
         sandboxBeforeRun(sandbox);
     }
     vm.createContext(sandbox);
+    // Snapshot the pristine sandbox (before any leaf injections) so each leaf's
+    // temp context starts from a clean base — sibling-leaf globals cannot bleed
+    // through and hide a missing import declaration.
+    const pristineSandbox = { ...sandbox };
     // Pre-load any sub-modules imported by main.js into the sandbox,
     // then strip their import declarations so the classic-script vm run works.
-    _loadImportsIntoSandbox(src, path.dirname(SCRIPT_PATH), sandbox);
+    _loadImportsIntoSandbox(src, path.dirname(SCRIPT_PATH), sandbox, 0, pristineSandbox);
     // Strip both single-line `import { a } from '...'` and multi-line
     // `import {\n  a, b\n} from '...'` declarations. [^}]* matches
     // across newlines (any char except `}`), so the pattern is the same
