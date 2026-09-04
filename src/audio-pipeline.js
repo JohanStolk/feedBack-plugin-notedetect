@@ -85,12 +85,12 @@ export function createAudioPipeline({
     ndPushChartToBridge, ndDrainEngineVerdicts,
     ndBridgeRawAudioFrame, ndBridgeRawPitch, ndBridgeRawFramesAvailable,
     ndBridgePitch, ndBridgeAudio, ndApplyVerifierOffset,
-    ndWantOwnSource, ndChannelIndex, ndDeviceKey, ndTryFreeSource,
+    ndWantOwnSource, getNdChannelIndex, ndDeviceKey, ndTryFreeSource,
     ndMinAnalysisSamples, ndEffectiveDetectionMethod, ndFreqToMidi,
     ndYinDetect, ndHpsDetect, ndCrepeDetect, ndShared, ndUpdateMlGate,
     ndChartSignature, setNdVerifierChartSig,
     runVerifyTarget,
-    hw,
+    getHw,
     externalStream,
     externalAudioCtx,
     optsSourceId,               // opts.sourceId at construction (number|undefined)
@@ -249,9 +249,10 @@ export function createAudioPipeline({
                 const rawLevel = Number.isFinite(levels.inputLevel) ? levels.inputLevel : 0;
                 const lvl = Math.min(1, Math.max(0, rawLevel));
                 setInputLevel(lvl);
-                if (hw && typeof hw.getTime === 'function') {
-                    const avO = (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
-                    const songT = hw.getTime() + avO;
+                if (getHw() && typeof getHw().getTime === 'function') {
+                    const _hw = getHw();
+                    const avO = (_hw.getAvOffset ? _hw.getAvOffset() / 1000 : 0);
+                    const songT = _hw.getTime() + avO;
                     const last = ndLevelSamples.length
                         ? ndLevelSamples[ndLevelSamples.length - 1].songT
                         : -Infinity;
@@ -307,17 +308,18 @@ export function createAudioPipeline({
             const remain = keep - fromBuf;
             if (remain > 0) nb.set(_rescueBuf.subarray(_rescueBuf.length - remain), 0);
             _rescueBuf = nb;
-            const hwTime = (hw && hw.getTime) ? hw.getTime() : 0;
+            const hwTime = (getHw() && getHw().getTime) ? getHw().getTime() : 0;
             pushRescueBuf(_rescueBuf, hwTime);
         }
 
         // Browser-path level samples (bridge path uses startBridgeLevelMeter)
-        if (!_usingBridge_ && buffer && buffer.length && hw && typeof hw.getTime === 'function') {
+        if (!_usingBridge_ && buffer && buffer.length && getHw() && typeof getHw().getTime === 'function') {
+            const _hw = getHw();
             let sum = 0;
             for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
             const lvl = Math.min(1, Math.max(0, Math.sqrt(sum / buffer.length) * 5));
-            const avO = (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
-            const songT = hw.getTime() + avO;
+            const avO = (_hw.getAvOffset ? _hw.getAvOffset() / 1000 : 0);
+            const songT = _hw.getTime() + avO;
             const last = ndLevelSamples.length ? ndLevelSamples[ndLevelSamples.length - 1].songT : -Infinity;
             if (songT < last - 0.05) resetLevelSamples();
             ndLevelSamples.push({ songT, level: lvl });
@@ -428,7 +430,7 @@ export function createAudioPipeline({
                         if (ndWantOwnSource && getSourceId() == null
                             && typeof desktop.audio.addSource === 'function') {
                             try {
-                                const id = await desktop.audio.addSource(ndChannelIndex, ndDeviceKey);
+                                const id = await desktop.audio.addSource(getNdChannelIndex(), ndDeviceKey);
                                 if (typeof id === 'number' && id >= 0) {
                                     setSourceId(id);
                                     _localOwnsSource = true;
@@ -438,7 +440,7 @@ export function createAudioPipeline({
                         }
                         const sid = getSourceId();
                         if (sid != null && sid !== 0 && typeof desktop.audio.setSourceInputChannel === 'function') {
-                            try { desktop.audio.setSourceInputChannel(sid, ndChannelIndex); } catch (_) {}
+                            try { desktop.audio.setSourceInputChannel(sid, getNdChannelIndex()); } catch (_) {}
                         }
                         if (getSourceId() != null) ndApplyVerifierOffset();
                     } else if (getSourceId() != null) {

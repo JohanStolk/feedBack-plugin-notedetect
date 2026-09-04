@@ -138,7 +138,7 @@ function makeDI(overrides = {}) {
         ndBridgeAudio:              () => null,
         ndApplyVerifierOffset:      () => {},
         ndWantOwnSource:            false,
-        ndChannelIndex:             0,
+        getNdChannelIndex:          () => 0,
         ndDeviceKey:                null,
         ndTryFreeSource:            () => true,
         ndMinAnalysisSamples:       () => 2048,
@@ -151,7 +151,7 @@ function makeDI(overrides = {}) {
         ndUpdateMlGate:             () => {},
         ndChartSignature:           () => '',
         runVerifyTarget:            async () => {},
-        hw:                         null,
+        getHw:                      () => null,
         externalStream:             null,
         externalAudioCtx:           null,
         optsSourceId:               undefined,
@@ -413,7 +413,7 @@ test('processFrame: calls resetLevelSamples when hw.getTime seeks backward', asy
         getCurrentArrangement:      () => 'lead', // not bass → no rescue buf
         ndEffectiveDetectionMethod: () => 'hps',
         ndHpsDetect:                () => ({ freq: 0, confidence: 0 }),
-        hw: { getTime: () => songT, getAvOffset: () => 0 },
+        getHw: () => ({ getTime: () => songT, getAvOffset: () => 0 }),
     });
     const pipe = createAudioPipeline(di);
 
