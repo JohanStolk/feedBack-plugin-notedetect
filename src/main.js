@@ -14857,6 +14857,12 @@ function createNoteDetector(options = {}) {
         _unbindDrillEvents: _drillConductor.unbindEvents,
         _drillSyncFromLoopState: _drillConductor.syncFromLoopState,
         _recordJudgment: recordJudgment,
+        // Settings-panel write-seam test hooks (nd-carve-5 cut 4).
+        // applySettings(changes) is private to the factory; expose it so
+        // test/drill_apply_settings_seam.test.js can drive each key and
+        // verify _factoryState reflects the assignment (typo/drop coverage).
+        _applySettings: applySettings,
+        _getState: _factoryState,
         // Position-aware score-recompute test hooks. _recomputeScoreToPosition
         // drives the rebuild directly; _bind/_unbindSeekResetEvents let tests
         // pin the song:seek listener-count contract without going through
