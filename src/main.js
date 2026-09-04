@@ -216,6 +216,7 @@ import { createDiagnosticCatalog } from './diagnostic-catalog.js';
 import { createRecordingCapture, _ndEncodeWavPcm16 } from './recording-capture.js';
 import { createCalibrationWizard } from './calibration-wizard.js';
 import { createTechniqueAssessment } from './technique-assessment.js';
+import { createAudioPipeline } from './audio-pipeline.js';
 try {
     if (typeof window !== 'undefined' && !window.feedBackDesktop && window.slopsmithDesktop) {
         window.feedBackDesktop = window.slopsmithDesktop;
@@ -3089,7 +3090,7 @@ function createNoteDetector(options = {}) {
         getDetectionMethod:         () => detectionMethod,
         getDiagCatalog:             () => _diagCatalog,
         // Write-back callbacks — wizard calls these to mutate factory state.
-        setInputGain:          (v) => { inputGain = v; if (gainNode) gainNode.gain.value = v; },
+        setInputGain:          (v) => { inputGain = v; _audioPipeline.applyInputGain(v); },
         setLatencyOffset:      (v) => { latencyOffset = v; },
         setEngineInputGain:    (v) => { engineInputGain = v; },
         setCurrentArrangement: (v) => { currentArrangement = v; },
@@ -3302,634 +3303,111 @@ function createNoteDetector(options = {}) {
     }
 
     // ── Audio pipeline ────────────────────────────────────────────────
-    async function startAudio() {
-        try {
-            // Desktop (Electron) bridge path. When the slopsmith-desktop
-            // shell is hosting us, the native JUCE engine already owns
-            // the audio device — see src/main/audio-bridge.ts in
-            // slopsmith-desktop. Drive monophonic detection from its
-            // `audio:getPitchDetection` IPC and polyphonic chord
-            // scoring from its `audio:scoreChord` IPC (native
-            // ChordScorer + lock-free input ring), instead of opening
-            // a parallel getUserMedia/Web-Audio chain. That parallel
-            // path fails on Linux Electron builds (Chromium denies
-            // `media` for the localhost-served renderer with no
-            // permission handler set) and duplicates work the engine
-            // is already doing every frame.
-            //
-            // The bridge feature-detects each IPC method separately,
-            // so an older slopsmith-desktop without scoreChord still
-            // gets the monophonic path; chord scoring is skipped
-            // (the chord branch in matchNotes() short-circuits when
-            // the IPC is missing, same as the pre-bridge browser
-            // path's no-buffer guard).
-            //
-            // Borrower mode (caller supplied a stream or AudioContext)
-            // skips this branch — those callers own the lifecycle and
-            // expect a real Web-Audio graph, e.g. for tap-tempo or
-            // visualisation taps.
-            const desktop = (typeof window !== 'undefined') ? window.feedBackDesktop : null;
-            const canUseDesktopBridge = !externalStream && !externalAudioCtx
-                && desktop && desktop.isDesktop
-                && desktop.audio
-                && typeof desktop.audio.getPitchDetection === 'function'
-                && typeof desktop.audio.isAvailable === 'function';
-            if (canUseDesktopBridge) {
-                let bridgeReady = false;
-                try {
-                    bridgeReady = await desktop.audio.isAvailable();
-                } catch (_) { /* treat as unavailable */ }
-                if (bridgeReady) {
-                    // Tie live detection to the onboarding Input Setup wizard's
-                    // selected input: open the audio-input domain's selected
-                    // source, which configures + starts the native engine on that
-                    // device (ASIO included) before we read pitch. No-op without
-                    // the domain — the legacy startAudio below is the fallback.
-                    await _ndOpenSelectedInputSource(ND_AUDIO_REQUESTER, 'note-detection');
-                    // Start the engine if the Audio Plugins panel hasn't
-                    // already done so — without it getPitchDetection
-                    // returns sentinel values (frequency: -1) forever.
-                    // (When open-source above handled it, the engine is already
-                    // running on the selected device, so this is a no-op.)
-                    try {
-                        const running = typeof desktop.audio.isAudioRunning === 'function'
-                            ? await desktop.audio.isAudioRunning()
-                            : false;
-                        if (!running && typeof desktop.audio.startAudio === 'function') {
-                            await desktop.audio.startAudio();
-                        }
-                    } catch (_) { /* engine surfaces its own errors */ }
+    const _audioPipeline = createAudioPipeline({
+        // ── Live accessors ────────────────────────────────────────────────
+        getEnabled:                () => enabled,
+        getCurrentArrangement:     () => currentArrangement,
+        getDetectionConfidenceMin: () => detectionConfidenceMin,
+        getNativeDetection:        () => nativeDetection,
+        getFrameSize:              () => frameSize,
+        getAutoEnableTrial:        () => autoEnableTrial,
+        getInputGain:              () => inputGain,
+        getSelectedChannel:        () => selectedChannel,
+        getSelectedDeviceId:       () => selectedDeviceId,
+        getSessionGen:             () => sessionGen,
+        getSourceId:               () => sourceId,
+        getNdUsingEngineVerifier:  () => _ndUsingEngineVerifier,
+        getNdHostChartSuspended:   () => _ndHostChartSuspended,
+        getNdOtherOwnsOurSlot:     () => _ndOtherOwnsOurSlot(),
+        getNdVerifierChartSig:     () => _ndVerifierChartSig,
+        getNdVerifyTarget:         () => _verifyTarget,
+        // ── Write-back callbacks ───────────────────────────────────────────
+        setUsingDesktopBridge:     (v) => { usingDesktopBridge = v; },
+        setBridgeDesktop:          (v) => { bridgeDesktop = v; },
+        setAudioCtx:               (v) => { audioCtx = v; },
+        setStream:                 (v) => { stream = v; },
+        setInputLevel:             (v) => { inputLevel = v; },
+        setInputPeak:              (v) => { inputPeak = v; },
+        setBridgeSampleRate:       (v) => { bridgeSampleRate = v; },
+        setNdUsingEngineVerifier:  (v) => { _ndUsingEngineVerifier = v; },
+        setUsingNativeFrames:      (v) => { usingNativeFrames = v; },
+        setDetectedMidi:           (v) => { detectedMidi = v; },
+        setDetectedConfidence:     (v) => { detectedConfidence = v; },
+        setDetectedString:         (v) => { detectedString = v; },
+        setDetectedFret:           (v) => { detectedFret = v; },
+        setDetectedDisplayMidi:    (v) => { detectedDisplayMidi = v; },
+        setBridgeLevelsUnavailable:(v) => { bridgeLevelsUnavailable = v; },
+        setInputLost:              (v) => { _inputLost = v; },
+        setHealthTrack:            (v) => { _healthTrack = v; },
+        setSourceId:               (v) => { sourceId = v; },
+        setNdOwnsSource:           (v) => { _ndOwnsSource = v; },
+        resetVerifierState:        () => {
+            _ndVerifierChartById  = new Map();
+            _ndVerifierChords     = new Map();
+            _ndVerifierChordKeyOf = new Map();
+            _ndPendingChords      = new Map();
+            _ndLastPushedPlayhead = 0;
+        },
+        onCbHeartbeat:             (now, gap) => { _lastAudioCbT = now; _maxCbGapMs = gap; },
+        pushRescueBuf:             (buf, endT) => { _rescueBuf = buf; _rescueBufEndT = endT; },
+        resetLevelSamples:         () => { _ndLevelSamples.length = 0; },
+        setNdVerifierChartSig:     (v) => { _ndVerifierChartSig = v; },
+        // ── Shared mutable array ───────────────────────────────────────────
+        ndLevelSamples:            _ndLevelSamples,
+        // ── Stable refs ───────────────────────────────────────────────────
+        matchNotes,
+        diagCatalog:               _diagCatalog,
+        recCapture:                _recCapture,
+        avCal:                     _avCal,
+        settingsPanel:             _settingsPanel,
+        openInstrumentStream,
+        ndOpenSelectedInputSource: _ndOpenSelectedInputSource,
+        ndSyncMlGate:              _ndSyncMlGate,
+        ndGateToken:               _ndGateToken,
+        ndDesktopSourceApiReady:   _ndDesktopSourceApiReady,
+        ndFlushOrphanSources:      _ndFlushOrphanSources,
+        ndOrphanSourceIds:         _ndOrphanSourceIds,
+        ndPushChartToBridge:       _ndPushChartToBridge,
+        ndDrainEngineVerdicts:     _ndDrainEngineVerdicts,
+        ndBridgeRawAudioFrame:     _ndBridgeRawAudioFrame,
+        ndBridgeRawPitch:          _ndBridgeRawPitch,
+        ndBridgeRawFramesAvailable:_ndBridgeRawFramesAvailable,
+        ndBridgePitch:             _ndBridgePitch,
+        ndBridgeAudio:             _ndBridgeAudio,
+        ndApplyVerifierOffset:     _ndApplyVerifierOffset,
+        ndWantOwnSource:           _ndWantOwnSource,
+        ndChannelIndex:            _ndChannelIndex,
+        ndDeviceKey:               _ndDeviceKey,
+        ndTryFreeSource:           _ndTryFreeSource,
+        ndMinAnalysisSamples:      _ndMinAnalysisSamples,
+        ndEffectiveDetectionMethod:_ndEffectiveDetectionMethod,
+        ndFreqToMidi:              _ndFreqToMidi,
+        ndYinDetect:               _ndYinDetect,
+        ndHpsDetect:               _ndHpsDetect,
+        ndCrepeDetect:             _ndCrepeDetect,
+        ndShared:                  _ndShared,
+        ndUpdateMlGate:            _ndUpdateMlGate,
+        ndChartSignature:          _ndChartSignature,
+        runVerifyTarget:           _runVerifyTarget,
+        hw,
+        externalStream,
+        externalAudioCtx,
+        optsSourceId:              (typeof opts.sourceId === 'number' && opts.sourceId >= 0) ? opts.sourceId : undefined,
+        ND_AUDIO_REQUESTER,
+        ND_LEVEL_HISTORY_S:        _ND_LEVEL_HISTORY_S,
+        RESCUE_BUF_MAX:            _RESCUE_BUF_MAX,
+        updateButton,
+        onStreamHealthRestart:     () => restartAudio(),
+    });
+    // Delegation stubs — the module owns the implementations.
+    function startAudio()              { return _audioPipeline.startAudio(); }
+    function stopAudio()               { _audioPipeline.stopAudio(); }
+    function processFrame(buffer)      { return _audioPipeline.processFrame(buffer); }
+    function startLevelMeter()         { _audioPipeline.startLevelMeter(); }
+    function stopLevelMeter()          { _audioPipeline.stopLevelMeter(); }
+    function startBridgeLevelMeter(d)  { _audioPipeline.startBridgeLevelMeter(d); }
+    function stopBridgeLevelMeter()    { _audioPipeline.stopBridgeLevelMeter(); }
 
-                    usingDesktopBridge = true;
-                    bridgeDesktop = desktop;
-                    accumBuffer = new Float32Array(0);
-
-                    // Bind a dedicated engine input source when this instance opted
-                    // in (multi-input / split-screen) — but ONLY when the addon
-                    // exposes the FULL source-indexed scoring API. A partial/
-                    // downlevel addon (e.g. addSource without scoreSourceChord)
-                    // must NOT leave us bound to a source we can't score, which
-                    // would silently stop scoring. In that case we stay on source 0
-                    // (legacy methods). Allocate once and keep it across disable/
-                    // enable (freed only on destroy); the default singleton + un-
-                    // opted instances stay on source 0 — byte-identical.
-                    if (_ndDesktopSourceApiReady(desktop.audio)) {
-                        // A ready addon can also reclaim any earlier orphans.
-                        _ndFlushOrphanSources();
-                        // Re-bind a caller-managed sourceId that an earlier degraded
-                        // enable cleared (opts.sourceId is the source of truth).
-                        if (sourceId == null && !_ndOwnsSource
-                            && typeof opts.sourceId === 'number' && opts.sourceId >= 0) {
-                            sourceId = opts.sourceId;
-                        }
-                        if (_ndWantOwnSource && sourceId == null
-                            && typeof desktop.audio.addSource === 'function') {
-                            try {
-                                const id = await desktop.audio.addSource(_ndChannelIndex, _ndDeviceKey);
-                                if (typeof id === 'number' && id >= 0) {
-                                    sourceId = id;
-                                    _ndOwnsSource = true;
-                                }
-                            } catch (_) { /* stay on source 0 */ }
-                        }
-                        // Keep the bound source's input channel in sync with the
-                        // current selection. A fresh addSource already bound it, but a
-                        // REUSED owned source — OR a caller-managed opts.sourceId — may
-                        // have had its channel changed (via setChannel) while detect was
-                        // disabled, so re-route on every enable for any non-default
-                        // source this detector drives (matches setChannel's sourceId!==0
-                        // contract). Never source 0 (the shared default).
-                        if (sourceId != null && sourceId !== 0
-                            && typeof desktop.audio.setSourceInputChannel === 'function') {
-                            try {
-                                desktop.audio.setSourceInputChannel(sourceId, _ndChannelIndex);
-                            } catch (_) { /* best-effort */ }
-                        }
-                        // Apply the user-dialed capture-latency correction to the
-                        // bound source (no-op at 0 / for source 0).
-                        if (sourceId != null) _ndApplyVerifierOffset();
-                    } else if (sourceId != null) {
-                        // This addon can't score per source (downlevel, or — in
-                        // theory — downgraded since a prior enable bound us). Don't
-                        // stay bound to a source we can't route to: best-effort free
-                        // an owned source (remembering it as an orphan if that fails)
-                        // and fall back to the legacy source-0 path, so
-                        // `sourceId != null` always implies the routed *Source*
-                        // methods exist.
-                        if (!_ndOwnsSource) {
-                            console.warn('[note_detect] desktop addon lacks the source-indexed '
-                                + 'scoring API; ignoring opts.sourceId and using the default input');
-                        } else if (!_ndTryFreeSource(sourceId)) {
-                            _ndOrphanSourceIds.push(sourceId);
-                        }
-                        sourceId = null;
-                        _ndOwnsSource = false;
-                    }
-
-                    // Record whether the engine's polyphonic ML detector
-                    // (Basic Pitch) is actually active — stamped into the
-                    // diagnostic export so a session is unambiguously tied to
-                    // ML vs the YIN fallback. typeof-guarded for downlevel
-                    // addons that predate the query.
-                    bridgeMlActive = false;
-                    if (typeof desktop.audio.isMlNoteDetection === 'function') {
-                        try {
-                            bridgeMlActive = (await desktop.audio.isMlNoteDetection()) === true;
-                        } catch (_) { /* leave false */ }
-                    }
-                    console.log(`[note_detect] desktop bridge active — ML detection: ${bridgeMlActive ? 'ON' : 'OFF (YIN fallback)'}`);
-
-                    // Cache the engine sample rate for any consumer
-                    // that needs the bridge-side rate (the chord
-                    // branch in matchNotes() doesn't — it dispatches
-                    // through audio:scoreChord which reads the rate
-                    // inside the engine). Reset to the 48000 default
-                    // first so a transient throw or stale cached
-                    // rate from a previous session can't leak in
-                    // after a device-change-driven restart.
-                    bridgeSampleRate = 48000;
-                    if (typeof desktop.audio.getSampleRate === 'function') {
-                        try {
-                            const sr = await desktop.audio.getSampleRate();
-                            if (Number.isFinite(sr) && sr > 0) bridgeSampleRate = sr;
-                        } catch (_) { /* keep the 48000 default */ }
-                    }
-
-                    // Whether this desktop build exposes the raw polyphonic
-                    // transcription API. Captured once — the addon's method
-                    // set is fixed for the session.
-                    const hasDetectNotes = typeof desktop.audio.detectNotes === 'function';
-
-                    // Native-frame detection (gear opt-in): run note_detect's
-                    // own detector on engine-captured PCM instead of the
-                    // engine's verdicts. Requires the raw-audio-frame pull.
-                    // Captured per-session like hasDetectNotes — the gate is
-                    // re-evaluated on the next enable/restart, so flipping the
-                    // toggle takes effect after restartAudio().
-                    usingNativeFrames = nativeDetection && _ndBridgeRawFramesAvailable();
-                    if (usingNativeFrames) {
-                        console.log('[note_detect] native-frame detection active — local '
-                            + `${detectionMethod || 'yin'} on engine audio; chords via engine scoreChord`);
-                    }
-
-                    detectInterval = setInterval(async () => {
-                        // Converge the ML gate every tick — arms in modes that
-                        // read ML (native-frame / non-verifier fallback), suspends
-                        // under the host or contained verifier. Cheap: a Set check
-                        // that only hits the bridge on an actual state change.
-                        _ndUpdateMlGate();
-                        if (!enabled || processingFrame) return;
-                        processingFrame = true;
-                        const gen = sessionGen;
-                        try {
-                            // A contained-playback verifier (setContainedChart)
-                            // has taken over the single engine chart slot with
-                            // its own chart + playhead. Host-song scoring is
-                            // suspended; the consumer drives the engine from its
-                            // own tick via pushContainedPlayhead — this loop
-                            // must do nothing that touches the chart slot or
-                            // re-pushes the host chart over the contained one.
-                            // _ndHostChartSuspended covers THIS instance when it
-                            // owns the slot; _ndOtherOwnsOurSlot() covers a
-                            // sibling instance on the same engine source.
-                            if (_ndHostChartSuspended || _ndOtherOwnsOurSlot()) return;
-                            // Native-frame detection (gear opt-in): pull the
-                            // engine's post-gate mono PCM and run note_detect's
-                            // OWN YIN/HPS/CREPE on it via the SAME processFrame
-                            // → matchNotes pipeline the browser path uses. On
-                            // the bridge, matchNotes routes chords to the
-                            // engine's harmonic-comb ChordScorer (scoreChord),
-                            // so this is "own monophonic detector + engine
-                            // chord verifier" on engine-captured audio. The
-                            // engine-verifier path is suppressed in this mode
-                            // (_ndPushChartToBridge bails on usingNativeFrames),
-                            // so _ndUsingEngineVerifier is always false here.
-                            if (usingNativeFrames) {
-                                const want = _ndMinAnalysisSamples(currentArrangement, bridgeSampleRate);
-                                let frame = null;
-                                try { frame = await _ndBridgeRawAudioFrame(want); }
-                                catch (_) { frame = null; }
-                                if (!enabled || gen !== sessionGen) return;
-                                // processFrame derives its sample rate from
-                                // bridgeSampleRate when there's no audioCtx
-                                // (the bridge case), so the engine rate flows
-                                // through to YIN/HPS/FFT math unchanged.
-                                //
-                                // processFrame runs the selected YIN/HPS/CREPE on
-                                // the engine PCM, sets detectedMidi/detectedConfidence
-                                // for the live HUD/pitch-display, then calls
-                                // matchNotes(buffer). matchNotes routes single-note
-                                // and chord VERIFICATION through _ndBridgeScoreChord
-                                // (harmonic-comb engine) because usingDesktopBridge
-                                // is still true — this is intentional: the engine's
-                                // spectral verifier is more reliable for hit/miss than
-                                // a raw frequency estimate, and the feature goal is
-                                // "chosen detector for live HUD + engine verifier for
-                                // final scoring" (matching how getPitchDetection +
-                                // scoreChord work on the normal bridge path). It is NOT
-                                // a replacement verification backend.
-                                if (frame && frame.length >= want) await processFrame(frame);
-                                return;
-                            }
-                            // Engine-verifier path: the engine scores the
-                            // pushed chart on its own background thread, so
-                            // this loop just drains finalized verdicts and
-                            // feeds them through the judgment pipeline. No
-                            // detectNotes / matchNotes work runs here — that
-                            // is exactly the per-tick load this change moves
-                            // off the renderer event loop.
-                            if (_ndUsingEngineVerifier) {
-                                // The chart loads asynchronously after
-                                // song:loaded (and can switch mid-session);
-                                // re-push whenever the live chart diverges
-                                // from what the engine currently holds.
-                                if (_ndChartSignature() !== _ndVerifierChartSig) {
-                                    await _ndPushChartToBridge();
-                                    if (!enabled || gen !== sessionGen) return;
-                                }
-                                await _ndDrainEngineVerdicts();
-                                if (!enabled || gen !== sessionGen) return;
-                                // Live monophonic pitch for provisional on-strike
-                                // gem feedback (see noteStateFor). The engine's
-                                // final verdict only lands after a note's sustain
-                                // window closes — often after the highway culls the
-                                // gem — so polling the live detector here lets a
-                                // struck note light immediately. One extra IPC per
-                                // tick alongside the verdict drain.
-                                //
-                                // Use getRawPitch, NOT getPitchDetection: it reads
-                                // the POST-noise-gate signal and returns midiNote
-                                // -1 the moment the string stops ringing (gate
-                                // closes), so the 'active' glow extinguishes when
-                                // the player mutes. getPitchDetection holds the
-                                // note through its decay, which kept muted sustains
-                                // lit. Fall back to getPitchDetection only if the
-                                // addon predates getRawPitch.
-                                try {
-                                    // Routes to getSourceRawPitch for a bound
-                                    // source, else the legacy getRawPitch (with the
-                                    // same getPitchDetection downlevel fallback).
-                                    const lp = await _ndBridgeRawPitch();
-                                    if (!enabled || gen !== sessionGen) return;
-                                    if (lp && typeof lp.midiNote === 'number' && lp.midiNote >= 0
-                                        && typeof lp.confidence === 'number'
-                                        // Strict `>` to match _sustainStillHeld's
-                                        // gate — a confidence landing exactly on
-                                        // the threshold must not store a pitch the
-                                        // hold logic would then ignore (flicker).
-                                        && lp.confidence > detectionConfidenceMin) {
-                                        detectedMidi = lp.midiNote;
-                                        detectedConfidence = lp.confidence;
-                                        // This branch returns before matchNotes(),
-                                        // so log the calibration detection here or
-                                        // auto-calibrate would never see a sample
-                                        // under the engine verifier (dets stays 0).
-                                        _avCal.logDetection();
-                                    } else {
-                                        detectedMidi = -1;
-                                        detectedConfidence = 0;
-                                    }
-                                } catch (_) {
-                                    // Clear on failure, don't keep-last: the sustain
-                                    // glow is driven from detectedMidi, and
-                                    // _sustainStillHeld refreshes its grace window
-                                    // every render. Holding a stale pitch across
-                                    // repeated IPC failures would keep a muted note
-                                    // glowing indefinitely. Clearing still lets
-                                    // NOTE_SUS_GRACE_MS bridge a one-off hiccup, then
-                                    // expire if the failures persist.
-                                    detectedMidi = -1;
-                                    detectedConfidence = 0;
-                                }
-                                _diagCatalog.setDiagDetector({
-                                    desktop_bridge: true,
-                                    ml: bridgeMlActive,
-                                    path: 'desktop-engine-verifier',
-                                });
-                                // The engine-verifier path returns before
-                                // matchNotes(), so run the timing-free verify
-                                // target here too (else notedetect:verify never
-                                // fires under the engine verifier). Done LAST so
-                                // the playhead-dependent drain/live-pitch above
-                                // run against this frame's playhead, not a
-                                // post-IPC-shifted one. Bridge path → scoreChord
-                                // IPC; the null buffer is unused there.
-                                if (_verifyTarget) await _runVerifyTarget(null);
-                                return;
-                            }
-                            // Onset-event detection. detectNotes carries a
-                            // per-pitch onsetSeq counter; a higher value than
-                            // we last consumed means that pitch was struck
-                            // anew. Consuming each onset once makes the
-                            // single-note path edge-triggered (fires at the
-                            // attack) instead of matching a pitch for its
-                            // whole ring. The matched judgment is timestamped
-                            // at the current playhead — not back-dated by the
-                            // onset age, which is not a reliable per-onset
-                            // duration. Chords are scored separately via the
-                            // scoreChord IPC, gated on a fresh chord-pitch
-                            // onset in bridgeNewOnsets.
-                            let detection = null;
-                            if (hasDetectNotes) {
-                                try { detection = await desktop.audio.detectNotes(); }
-                                catch (_) { detection = null; }
-                                if (!enabled || gen !== sessionGen) return;
-                            }
-
-                            if (detection && Array.isArray(detection.notes)) {
-                                bridgeNewOnsets.clear();
-                                for (const n of detection.notes) {
-                                    if (!n || typeof n.midi !== 'number'
-                                        || typeof n.onsetSeq !== 'number') continue;
-                                    const prev = bridgeOnsetSeqSeen.get(n.midi);
-                                    if (prev !== undefined && n.onsetSeq <= prev) continue;
-                                    bridgeOnsetSeqSeen.set(n.midi, n.onsetSeq);
-                                    // The first poll only primes the seq
-                                    // baseline — pre-existing onsets from
-                                    // before enable must not replay as a burst.
-                                    if (bridgeOnsetPrimed
-                                        && typeof n.confidence === 'number'
-                                        && n.confidence >= detectionConfidenceMin) {
-                                        bridgeNewOnsets.set(n.midi, {
-                                            ageMs: Number.isFinite(n.onsetMs) ? n.onsetMs : 0,
-                                            conf: n.confidence,
-                                        });
-                                    }
-                                }
-                                bridgeOnsetPrimed = true;
-
-                                // Single-note pick = highest-confidence active
-                                // note (level-triggered). Edge-triggering the
-                                // single-note path on the onset posteriorgram
-                                // alone proved too sparse for fast guitar and
-                                // dropped notes; the onset events above are
-                                // used only to gate chord timing.
-                                let best = null;
-                                for (const n of detection.notes) {
-                                    if (n && typeof n.midi === 'number'
-                                        && (best === null || n.confidence > best.confidence)) {
-                                        best = n;
-                                    }
-                                }
-                                if (best && best.confidence >= detectionConfidenceMin) {
-                                    detectedMidi = best.midi;
-                                    detectedConfidence = best.confidence;
-                                } else {
-                                    detectedMidi = -1;
-                                    detectedConfidence = 0;
-                                    detectedString = -1;
-                                    detectedFret = -1;
-                                }
-                            } else {
-                                bridgeNewOnsets.clear();
-                                const p = await _ndBridgePitch();
-                                if (!enabled || gen !== sessionGen) return;
-                                if (p && typeof p.midiNote === 'number' && p.midiNote >= 0
-                                    && typeof p.confidence === 'number' && p.confidence >= detectionConfidenceMin) {
-                                    detectedMidi = p.midiNote;
-                                    detectedConfidence = p.confidence;
-                                } else {
-                                    detectedMidi = -1;
-                                    detectedConfidence = 0;
-                                    detectedString = -1;
-                                    detectedFret = -1;
-                                }
-                            }
-                            // Stamp the detector identity from the path that
-                            // actually ran this tick (read back by the
-                            // diagnostic export).
-                            _diagCatalog.setDiagDetector({
-                                desktop_bridge: true,
-                                ml: bridgeMlActive,
-                                path: bridgeMlActive ? 'desktop-ml-basicpitch' : 'desktop-yin',
-                            });
-                            // The chord branch in matchNotes() dispatches the
-                            // audio:scoreChord IPC — no raw audio buffer is
-                            // threaded here, the engine reads its own input
-                            // ring. Pass null; the single-note path is gated
-                            // on detectedMidi >= 0 and skips itself regardless,
-                            // and checkMisses() is independent.
-                            await matchNotes(null);
-                        } catch (e) {
-                            console.warn('[note_detect] bridge poll failed:', e && e.message ? e.message : e);
-                        } finally {
-                            processingFrame = false;
-                        }
-                    }, 50);
-
-                    startBridgeLevelMeter(desktop);
-                    _settingsPanel.populateDevices();
-                    return true;
-                }
-                // bridge present but engine unavailable — fall through
-                // to the getUserMedia path so the user sees a concrete
-                // error (and can troubleshoot the engine separately)
-                // rather than silent failure.
-            }
-
-            // Acquire the stream — use the supplied one or open
-            // getUserMedia for our own.
-            if (externalStream) {
-                stream = externalStream;
-            } else {
-                const constraints = {
-                    audio: {
-                        echoCancellation: false,
-                        noiseSuppression: false,
-                        autoGainControl: false,
-                        channelCount: 2,
-                    }
-                };
-                if (selectedDeviceId) {
-                    constraints.audio.deviceId = { exact: selectedDeviceId };
-                }
-
-                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                    const isHttp = location.protocol === 'http:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1';
-                    const msg = isHttp
-                        ? 'Microphone access requires HTTPS. You are accessing Slopsmith over HTTP from a non-localhost address. Either:\n\n1. Use a reverse proxy with HTTPS (recommended)\n2. Access via localhost\n3. Add a self-signed certificate to the server'
-                        : 'Microphone access is not available in this browser. Use Chrome or Edge.';
-                    throw new Error(msg);
-                }
-                // On the silent first auto-enable attempt, don't let a
-                // transiently-unmatched (still-enumerating) saved device be
-                // forgotten — the delayed retry re-tries the real device.
-                stream = await openInstrumentStream(constraints, {
-                    allowDeviceFallback: !autoEnableTrial,
-                });
-            }
-
-            // Acquire the context independently — a caller can supply
-            // just one of {stream, context} and we create the other.
-            // `latencyHint: 'interactive'` asks the browser for the
-            // lowest-latency input/output config the platform supports —
-            // Chromium otherwise picks platform-defaults that can add
-            // 10-30 ms of buffer for no reason. Real-time pitch-detect
-            // is exactly the case the hint exists for. Falls back
-            // gracefully if a host hands us an externalAudioCtx that's
-            // already constructed.
-            audioCtx = externalAudioCtx || new (window.AudioContext || window.webkitAudioContext)({
-                latencyHint: 'interactive',
-            });
-
-            sourceNode = audioCtx.createMediaStreamSource(stream);
-            const streamChannels = sourceNode.channelCount;
-            // Watch this stream's track for a mid-session interface drop.
-            try { _bindStreamHealth(stream); } catch (_) {}
-
-            gainNode = audioCtx.createGain();
-            gainNode.gain.value = inputGain;
-
-            if (streamChannels >= 2 && selectedChannel !== 'mono') {
-                splitterNode = audioCtx.createChannelSplitter(2);
-                sourceNode.connect(splitterNode);
-                mergerNode = audioCtx.createChannelMerger(1);
-                const chIdx = selectedChannel === 'left' ? 0 : 1;
-                splitterNode.connect(mergerNode, chIdx, 0);
-                mergerNode.connect(gainNode);
-            } else {
-                sourceNode.connect(gainNode);
-            }
-
-            levelAnalyser = audioCtx.createAnalyser();
-            levelAnalyser.fftSize = 512;
-            levelAnalyser.smoothingTimeConstant = 0.8;
-            gainNode.connect(levelAnalyser);
-
-            const processor = audioCtx.createScriptProcessor(frameSize, 1, 1);
-            worklet = processor;
-            accumBuffer = new Float32Array(0);
-            pendingBuffer = null;
-
-            processor.onaudioprocess = (e) => {
-                // Heartbeat: stamp every callback (even when disabled) so the
-                // scoring watchdog can tell a stalled audio graph from a quiet
-                // instrument. Also track the worst inter-callback gap — the
-                // direct measure of main-thread starvation. Cheap; runs ~20×/s.
-                const _cbNow = (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0;
-                if (_lastAudioCbT) {
-                    const gap = _cbNow - _lastAudioCbT;
-                    if (gap > _maxCbGapMs) _maxCbGapMs = gap;
-                }
-                _lastAudioCbT = _cbNow;
-                if (!enabled) return;
-                const input = e.inputBuffer.getChannelData(0);
-                const prev = accumBuffer;
-                const combined = new Float32Array(prev.length + input.length);
-                combined.set(prev);
-                combined.set(input, prev.length);
-                // Bass needs a longer window to resolve its low fundamental;
-                // size the analysis frame from the arrangement + device rate.
-                const minSamples = _ndMinAnalysisSamples(currentArrangement, audioCtx.sampleRate);
-                if (combined.length >= minSamples) {
-                    const start = combined.length - minSamples;
-                    pendingBuffer = combined.slice(start, start + minSamples);
-                    accumBuffer = new Float32Array(0);
-                } else {
-                    accumBuffer = combined;
-                }
-            };
-
-            // Detection runs on a timer, not in the audio callback. The
-            // in-flight guard matters when CREPE inference takes longer
-            // than the 50 ms tick — without it, multiple processFrame
-            // promises can be alive at once and resolve out of order,
-            // letting a stale detection overwrite a newer one.
-            detectInterval = setInterval(() => {
-                if (processingFrame || !pendingBuffer) return;
-                const buf = pendingBuffer;
-                pendingBuffer = null;
-                processingFrame = true;
-                processFrame(buf).finally(() => { processingFrame = false; });
-            }, 50);
-
-            gainNode.connect(processor);
-            processor.connect(audioCtx.destination);
-
-            startLevelMeter();
-            _settingsPanel.populateDevices();
-
-            return true;
-        } catch (e) {
-            console.error('Note detect: mic access denied or failed:', e);
-            // Suppress the user-facing alert if the instance is no
-            // longer enabled — the enable/restart was superseded by a
-            // concurrent disable (e.g. song switch while the mic
-            // permission prompt was open). Surfacing an error the
-            // user never asked to see in that case is just noise.
-            // The console.error still goes to devtools for
-            // diagnostics. autoEnableTrial silences the automatic
-            // first auto-enable attempt (a transient not-ready USB device
-            // shouldn't pop a dialog on load — the retry surfaces it).
-            if (enabled && !autoEnableTrial) {
-                alert('Note Detection: Could not access audio input.\n\n' + e.message);
-            }
-            // Partial-init cleanup — if we got as far as acquiring the
-            // stream or creating any AudioNodes before the throw, we
-            // own the teardown. stopAudio is null-safe for every
-            // resource and respects ownsStream / ownsAudioCtx, so it
-            // handles partial state regardless of where we failed.
-            stopAudio();
-            return false;
-        }
-    }
-
-    // Watch the live input MediaStreamTrack for the interface dropping out
-    // mid-session (USB/driver glitch, audio focus loss). `ended`/`mute` mark the
-    // input lost + surface it (not left guessing why nothing scored) and, after
-    // a short grace for the device to self-heal, re-acquire ONCE — throttled so
-    // a flapping device can't thrash getUserMedia. `unmute` clears it.
-    // Detach the ended/mute/unmute listeners bound by a previous
-    // _bindStreamHealth. On the shared externalStream path the same track
-    // survives restart cycles, so without this each startAudio() would stack
-    // another set of closures on it and fire markLost() N times per drop.
-    function _unbindStreamHealth() {
-        if (!_healthHandlers) return;
-        const { track, ended, mute, unmute } = _healthHandlers;
-        try {
-            track.removeEventListener('ended', ended);
-            track.removeEventListener('mute', mute);
-            track.removeEventListener('unmute', unmute);
-        } catch (_) { /* track event API unavailable */ }
-        _healthHandlers = null;
-    }
-
-    function _bindStreamHealth(s) {
-        if (!s || typeof s.getAudioTracks !== 'function') return;
-        const track = s.getAudioTracks()[0];
-        if (!track) return;
-        // Drop any prior binding first so restart cycles don't accumulate
-        // duplicate listeners on a reused track.
-        _unbindStreamHealth();
-        _healthTrack = track;   // captured for the dropout-telemetry record
-        const markLost = (why) => {
-            if (_inputLost || !enabled) return;
-            _inputLost = true;
-            console.warn(`[note_detect] input ${why} — the audio interface dropped the input stream`);
-            try { updateButton(); } catch (_) {}
-            setTimeout(() => {
-                if (!enabled || !_inputLost) return;
-                const now = (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0;
-                if (now - _lastInputRecover < 4000) return;
-                _lastInputRecover = now;
-                console.warn('[note_detect] re-acquiring input after drop');
-                try { restartAudio(); } catch (_) {}
-            }, 1500);
-        };
-        const onEnded = () => markLost('ended');
-        const onMute = () => markLost('muted');
-        const onUnmute = () => {
-            if (!_inputLost) return;
-            _inputLost = false;
-            try { updateButton(); } catch (_) {}
-        };
-        try {
-            track.addEventListener('ended', onEnded);
-            track.addEventListener('mute', onMute);
-            track.addEventListener('unmute', onUnmute);
-            _healthHandlers = { track, ended: onEnded, mute: onMute, unmute: onUnmute };
-        } catch (_) { /* track event API unavailable */ }
-    }
 
     // Scoring watchdog. Bound ONCE at construction (default singleton), NOT
     // inside startAudio: the worst failure (a getUserMedia race that makes
@@ -3957,7 +3435,7 @@ function createNoteDetector(options = {}) {
         const playing = !!(window.slopsmith && window.slopsmith.isPlaying);
         // Only meaningful while playing AND the user wants detection on.
         if (!playing || !detectPreference) { _wdPlayStartT = 0; _clearScoringStall(); return; }
-        if (!_wdPlayStartT) { _wdPlayStartT = now; _maxCbGapMs = 0; }  // fresh play: reset starvation gauge
+        if (!_wdPlayStartT) { _wdPlayStartT = now; _maxCbGapMs = 0; _audioPipeline.resetMaxCbGap(); }  // fresh play: reset starvation gauge
         // Grace: let enable()/startAudio come up after Play before judging.
         if (now - _wdPlayStartT < 2500) return;
         // Healthy = detection enabled AND the audio callback fired recently. The
@@ -4047,7 +3525,6 @@ function createNoteDetector(options = {}) {
             audio_ctx_state: (audioCtx && audioCtx.state) || null,
             sample_rate: (audioCtx && audioCtx.sampleRate) || null,
             frame_size: frameSize,
-            processing_frame: processingFrame,
             max_cb_gap_ms: _maxCbGapMs,
             rec_armed: _recCapture.isArmedOrTraining(),
             using_bridge: usingDesktopBridge,
@@ -4061,85 +3538,6 @@ function createNoteDetector(options = {}) {
         try { if (_diagCatalog.getLiveSessionId()) _diagCatalog.streamLiveJudgment(rec); } catch (_) {}
     }
 
-    function stopAudio() {
-        // Drop this instance's ML-gate claim while the bridge is still
-        // resolvable (bridgeDesktop is cleared below) so the engine ML pipeline
-        // suspends once no other detector instance still needs it. Explicit
-        // false rather than _ndUpdateMlGate() — usingDesktopBridge is still true
-        // here, so the predicate could otherwise miscompute a stale arm.
-        _ndSyncMlGate(_ndGateToken, false, _ndBridgeAudio());
-        _inputLost = false;
-        _unbindStreamHealth();
-        _healthTrack = null;
-        stopLevelMeter();
-        stopBridgeLevelMeter();
-        if (detectInterval) { clearInterval(detectInterval); detectInterval = null; }
-        pendingBuffer = null;
-        // Bridge path doesn't own the JUCE engine — leave audio
-        // running for the Audio Plugins panel / other features. Drop
-        // the cached preload reference and the flag so a subsequent
-        // enable re-resolves window.feedBackDesktop fresh.
-        usingDesktopBridge = false;
-        usingNativeFrames = false;
-        bridgeDesktop = null;
-        // Drop the engine-verifier state — a subsequent enable re-pushes a
-        // fresh chart via _ndPushChartToBridge(). Any chart still held by the
-        // engine is harmless: nothing drains its verdicts once the flag is off.
-        _ndUsingEngineVerifier = false;
-        _ndVerifierChartById = new Map();
-        _ndVerifierChords = new Map();
-        _ndVerifierChordKeyOf = new Map();
-        _ndPendingChords = new Map();
-        _ndLastPushedPlayhead = 0;
-        bridgeMlActive = false;
-        bridgeOnsetSeqSeen = new Map();
-        bridgeNewOnsets = new Map();
-        bridgeOnsetPrimed = false;
-        // Disconnect the full node chain in reverse-connect order.
-        // Critical in borrower mode (external audioCtx): we leave the
-        // caller's context open, and any node we don't disconnect
-        // stays live in its graph across enable/disable cycles.
-        if (worklet) {
-            worklet.onaudioprocess = null;
-            try { worklet.disconnect(); } catch (e) { /* already disconnected */ }
-            worklet = null;
-        }
-        if (levelAnalyser) {
-            try { levelAnalyser.disconnect(); } catch (e) {}
-            levelAnalyser = null;
-        }
-        if (gainNode) {
-            try { gainNode.disconnect(); } catch (e) {}
-            gainNode = null;
-        }
-        if (mergerNode) {
-            try { mergerNode.disconnect(); } catch (e) {}
-            mergerNode = null;
-        }
-        if (splitterNode) {
-            try { splitterNode.disconnect(); } catch (e) {}
-            splitterNode = null;
-        }
-        if (sourceNode) {
-            try { sourceNode.disconnect(); } catch (e) {}
-            sourceNode = null;
-        }
-        // Tear down each resource only if we own it. Ownership is
-        // tracked per-resource (see ownsStream / ownsAudioCtx at the
-        // top of the factory) so a caller can pass just a stream or
-        // just a context without leaking the other.
-        if (stream && ownsStream) {
-            stream.getTracks().forEach(t => t.stop());
-        }
-        stream = null;
-        if (audioCtx && ownsAudioCtx) {
-            try { audioCtx.close(); } catch (e) { /* may already be closed */ }
-        }
-        audioCtx = null;
-        inputLevel = 0;
-        inputPeak = 0;
-        accumBuffer = new Float32Array(0);
-    }
 
     // Per-instance promise chain that serializes ALL audio-lifecycle
     // operations that await startAudio — both restartAudio and the
@@ -4165,9 +3563,9 @@ function createNoteDetector(options = {}) {
         return queueAudioOp(async () => {
             sessionGen++;
             const gen = sessionGen;
-            stopAudio();
+            _audioPipeline.stopAudio();
             if (!enabled) return;
-            const ok = await startAudio();
+            const ok = await _audioPipeline.startAudio();
             // Treat a restart failure (e.g. mic permission revoked,
             // device unplugged, selected deviceId no longer exists)
             // as a hard disable. Without this, the instance would
@@ -4188,317 +3586,11 @@ function createNoteDetector(options = {}) {
             // and our return. Tear down what startAudio just
             // acquired in that case.
             if (gen !== sessionGen || !enabled) {
-                stopAudio();
+                _audioPipeline.stopAudio();
             }
         });
     }
 
-    // ── Level meter ───────────────────────────────────────────────────
-
-    // Desktop-bridge equivalent of startLevelMeter(). The engine already
-    // computes RMS + peak on the audio thread; here we just poll those
-    // and drive the same DOM bar the Web-Audio path drives. Polled on
-    // setInterval rather than rAF so the IPC round-trip doesn't pin
-    // requestAnimationFrame to the IPC cadence when the renderer
-    // throttles in the background.
-    function startBridgeLevelMeter(desktop) {
-        stopBridgeLevelMeter();
-        // Bail before installing the timer if the engine doesn't expose
-        // getLevels — otherwise we'd run a no-op poll forever, leak the
-        // interval, and never surface the missing capability.
-        if (!desktop || !desktop.audio) {
-            // Bridge/audio not ready yet — a timing state, NOT a capability
-            // verdict. Don't latch unavailable here, or a pre-init call would
-            // wrongly force fixed full glow; leave the latch for a confirmed
-            // missing getLevels below.
-            return;
-        }
-        if (typeof desktop.audio.getLevels !== 'function') {
-            bridgeLevelsUnavailable = true;
-            return;
-        }
-        bridgeLevelsUnavailable = false;
-        // In-flight guard — if an IPC `getLevels()` round-trip takes
-        // longer than the 50 ms timer, queueing further calls would
-        // build up a backlog and process stale readings out-of-order.
-        // Same pattern as the pitch poll's `processingFrame` guard.
-        let levelsInFlight = false;
-        bridgeLevelTimer = setInterval(async () => {
-            if (!enabled || !usingDesktopBridge || levelsInFlight) return;
-            levelsInFlight = true;
-            try {
-                // A BOUND source (multi-input panel) must gate on ITS OWN device's
-                // level — not the global/primary level. Otherwise the silence gate
-                // (which can force a detected note to a miss when its level window
-                // looks silent) reads the primary device, which is silent while the
-                // user plays a DIFFERENT bound interface, and force-fails every hit.
-                let levels;
-                if (sourceId != null && sourceId !== 0) {
-                    // A NON-DEFAULT (owned / extra-device) source must gate on ITS OWN
-                    // meter. If the addon is too old to expose getSourceLevels, do NOT
-                    // fall back to the global getLevels() — that reads the primary
-                    // device, which is silent while the user plays this interface, so
-                    // the silence gate would force EVERY note on it to a miss. Skip the
-                    // poll instead (the gate then has no data and never force-fails).
-                    if (typeof desktop.audio.getSourceLevels !== 'function') {
-                        // Older addon: can't read THIS source's level. Latch
-                        // unavailable so the sustain-glow fixed-fallback engages (and
-                        // we don't gate on the wrong meter). DROP any level history from
-                        // a prior metered session so the silence gate sees "no data"
-                        // rather than force-failing on the previous source's levels.
-                        bridgeLevelsUnavailable = true;
-                        _ndLevelSamples.length = 0;
-                        return;
-                    }
-                    levels = await desktop.audio.getSourceLevels(sourceId);
-                } else {
-                    levels = await desktop.audio.getLevels();
-                }
-                // Re-check after the await: disable()/destroy() can fire
-                // between the IPC round-trip and the resolve, and the
-                // bridge timer doesn't track sessionGen the way the
-                // pitch poller does. Without this we'd race-write
-                // inputLevel/inputPeak and touch the DOM on a torn-down
-                // instance.
-                if (!enabled || !usingDesktopBridge) return;
-                if (!levels) return;
-                // Engine reports peaks in 0..1 already; the Web-Audio
-                // branch scales RMS by 5 for headroom. Use the engine's
-                // value directly — overdriving the bar is a worse UX
-                // than a slightly conservative reading.
-                // Nullish-coalesce so a legitimate `0` reading (silence)
-                // isn't replaced by the fallback — `0 || x` falls through to
-                // x, which would inflate the bar during quiet moments.
-                const rawLevel = Number.isFinite(levels.inputLevel) ? levels.inputLevel : 0;
-                inputLevel = Math.min(1, Math.max(0, rawLevel));
-                // Record (songT, level) for the silence gate in the engine
-                // verdict drain. The buffer assumes songT advances
-                // monotonically; on a backward jump (seek, drill loop
-                // restart) we'd otherwise keep stale post-jump high-time
-                // samples that the shift()-prune never removes, mixing two
-                // timelines into the same window and forcing false misses.
-                // Clear the buffer on any backward jump.
-                if (hw && typeof hw.getTime === 'function') {
-                    const avO = (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
-                    const songT = hw.getTime() + avO;
-                    const last = _ndLevelSamples.length
-                        ? _ndLevelSamples[_ndLevelSamples.length - 1].songT
-                        : -Infinity;
-                    if (songT < last - 0.05) {
-                        // Time went backward (seek / drill wrap). Reset.
-                        _ndLevelSamples.length = 0;
-                    }
-                    _ndLevelSamples.push({ songT, level: inputLevel });
-                    const cutoff = songT - _ND_LEVEL_HISTORY_S;
-                    while (_ndLevelSamples.length > 0 && _ndLevelSamples[0].songT < cutoff) {
-                        _ndLevelSamples.shift();
-                    }
-                    // Pause-safe cap: songT-only pruning relies on songT
-                    // advancing, but if playback is paused (or stuck in a
-                    // menu) while this 50 ms timer keeps firing, every new
-                    // sample has the same songT and the time-based prune
-                    // never fires. Enforce a hard sample-count cap as a
-                    // safety net so the buffer can't grow unbounded across
-                    // a paused session. 6 s of 50 ms polls → 120 samples,
-                    // so 240 (2× headroom) is plenty for active playback
-                    // and still bounded during pauses.
-                    while (_ndLevelSamples.length > 240) {
-                        _ndLevelSamples.shift();
-                    }
-                }
-                const rawPeak = Number.isFinite(levels.inputPeak) ? levels.inputPeak : inputLevel;
-                const peak = Math.min(1, Math.max(0, rawPeak));
-                if (peak > inputPeak) {
-                    inputPeak = peak;
-                    peakDecay = 30;
-                } else if (peakDecay > 0) {
-                    peakDecay--;
-                } else {
-                    inputPeak *= 0.95;
-                }
-                _settingsPanel.drawSettingsVU();
-            } catch (_) { /* one bad poll shouldn't stop the meter */ }
-            finally { levelsInFlight = false; }
-        }, 50);
-    }
-
-    function stopBridgeLevelMeter() {
-        if (bridgeLevelTimer) {
-            clearInterval(bridgeLevelTimer);
-            bridgeLevelTimer = null;
-        }
-    }
-
-    function startLevelMeter() {
-        stopLevelMeter();
-        // Cache the analyser read buffer across rAF ticks. At 60 fps
-        // with fftSize=512 this was allocating ~120 kB/s per enabled
-        // instance; reusing a single Float32Array (re-allocating only
-        // if fftSize changes) keeps the meter out of the GC path.
-        let levelBuf = null;
-        let levelBufSize = 0;
-        const tick = () => {
-            if (!levelAnalyser) return;
-            const fftSize = levelAnalyser.fftSize;
-            if (!levelBuf || levelBufSize !== fftSize) {
-                levelBuf = new Float32Array(fftSize);
-                levelBufSize = fftSize;
-            }
-            levelAnalyser.getFloatTimeDomainData(levelBuf);
-            let sum = 0;
-            for (let i = 0; i < levelBuf.length; i++) sum += levelBuf[i] * levelBuf[i];
-            const rms = Math.sqrt(sum / levelBuf.length);
-            inputLevel = Math.min(1, rms * 5);
-            if (inputLevel > inputPeak) {
-                inputPeak = inputLevel;
-                peakDecay = 30;
-            } else if (peakDecay > 0) {
-                peakDecay--;
-            } else {
-                inputPeak *= 0.95;
-            }
-            _settingsPanel.drawSettingsVU();
-            levelRaf = requestAnimationFrame(tick);
-        };
-        levelRaf = requestAnimationFrame(tick);
-    }
-
-    function stopLevelMeter() {
-        if (levelRaf) {
-            cancelAnimationFrame(levelRaf);
-            levelRaf = null;
-        }
-    }
-
-    // nd-carve-5 cut 4: _vuSetPanel and drawSettingsVU moved to settings-panel.js.
-    // Call via _settingsPanel.vuSetPanel(null) and _settingsPanel.drawSettingsVU().
-
-    // ── Frame processing ──────────────────────────────────────────────
-    async function processFrame(buffer) {
-        // Append to the rolling raw-audio buffer for the bass miss rescue
-        // (checkMisses). Bass only — guitar's higher fundamentals resolve in
-        // the short window, so it doesn't need (or pay for) this.
-        if (currentArrangement === 'bass' && buffer && buffer.length) {
-            const keep = Math.min(_RESCUE_BUF_MAX, _rescueBuf.length + buffer.length);
-            const nb = new Float32Array(keep);
-            const fromBuf = Math.min(buffer.length, keep);
-            nb.set(buffer.subarray(buffer.length - fromBuf), keep - fromBuf);
-            const remain = keep - fromBuf;
-            if (remain > 0) nb.set(_rescueBuf.subarray(_rescueBuf.length - remain), 0);
-            _rescueBuf = nb;
-            if (hw && hw.getTime) _rescueBufEndT = hw.getTime();
-        }
-        // Record the per-frame input level into the level-history time series so
-        // the silence gate ("was the player silent here") works on the BROWSER
-        // path too (it was desktop-only — fed from the engine's level callback).
-        // Without this, a stretch where the player stopped playing is
-        // indistinguishable from a low-bass detection gap downstream. Same rms*5
-        // scaling + 0.02 threshold the desktop path uses; skip on the bridge
-        // path (its level callback already records). Pruning / backward-jump
-        // reset mirror the desktop block.
-        if (!usingDesktopBridge && buffer && buffer.length && hw && typeof hw.getTime === 'function') {
-            let sum = 0;
-            for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
-            const lvl = Math.min(1, Math.max(0, Math.sqrt(sum / buffer.length) * 5));
-            const avO = (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
-            const songT = hw.getTime() + avO;
-            const last = _ndLevelSamples.length ? _ndLevelSamples[_ndLevelSamples.length - 1].songT : -Infinity;
-            if (songT < last - 0.05) _ndLevelSamples.length = 0;   // seek / drill-wrap → reset
-            _ndLevelSamples.push({ songT, level: lvl });
-            const cutoff = songT - _ND_LEVEL_HISTORY_S;
-            while (_ndLevelSamples.length > 0 && _ndLevelSamples[0].songT < cutoff) _ndLevelSamples.shift();
-            while (_ndLevelSamples.length > 240) _ndLevelSamples.shift();
-        }
-        let result;
-        let detectorUsed;
-        // Capture the session generation at frame start. disable()
-        // increments sessionGen, so any frame that was already running
-        // past an `await` sees a changed generation and bails rather
-        // than apply stale hits / fire stale events. Without this
-        // guard a CREPE inference in flight during song switch would
-        // score against the old session's chart.
-        const gen = sessionGen;
-        // On the desktop bridge there is no audioCtx; use the engine
-        // sample rate cached at startAudio() time instead. Browser
-        // path keeps reading audioCtx.sampleRate.
-        const sr = audioCtx ? audioCtx.sampleRate : bridgeSampleRate;
-        const activeMethod = _ndEffectiveDetectionMethod();
-        switch (activeMethod) {
-            case 'crepe':
-                if (_ndShared.model) {
-                    result = await _ndCrepeDetect(buffer);
-                    detectorUsed = 'crepe';
-                    if (result.freq <= 0 || result.confidence < detectionConfidenceMin) {
-                        result = _ndYinDetect(buffer, sr);
-                        detectorUsed = 'yin';
-                    }
-                    break;
-                }
-                result = _ndYinDetect(buffer, sr);
-                detectorUsed = 'yin';
-                break;
-            case 'hps':
-                result = _ndHpsDetect(buffer, sr);
-                detectorUsed = 'hps';
-                break;
-            case 'yin':
-            default:
-                result = _ndYinDetect(buffer, sr);
-                detectorUsed = 'yin';
-        }
-
-        // If the instance was disabled (or re-enabled into a new
-        // session) while CREPE was awaiting, drop this result on the
-        // floor — don't touch detection state or fire events.
-        if (!enabled || gen !== sessionGen) return;
-
-        if (result.freq <= 0 || result.confidence < detectionConfidenceMin) {
-            if (result.underBuffered && !underBufferWarned) {
-                console.warn(`[note_detect] ${detectorUsed} received an undersized buffer — low-frequency (bass) notes will drop silently. Check the frame accumulation path.`);
-                underBufferWarned = true;
-            }
-            detectedMidi = -1;
-            detectedConfidence = 0;
-            detectedString = -1;
-            detectedFret = -1;
-            detectedDisplayMidi = -1;
-            // Fall through to matchNotes — the chord path doesn't need a
-            // single confident pitch (it scores per-string energy bands),
-            // and chord audio is the case where YIN/HPS most often
-            // returns low confidence. Single-note matching inside
-            // matchNotes() is gated on detectedMidi >= 0, so it skips
-            // itself; only chord groups get evaluated here.
-        } else {
-            detectedMidi = _ndFreqToMidi(result.freq);
-            detectedConfidence = result.confidence;
-        }
-
-        // Stamp the detector identity for the diagnostic. Use `detectorUsed`
-        // (the detector that actually ran this frame), so an auto-HPS bass
-        // frame reports as hps AND a crepe→yin low-confidence/missing-model
-        // fallback reports the real yin, not the requested crepe. The same
-        // JS-DSP detector runs for both the browser path and the desktop
-        // native-frame mode; only the audio SOURCE differs, so distinguish
-        // them in the path tag (and flag desktop_bridge in native-frame mode).
-        _diagCatalog.setDiagDetector(usingNativeFrames
-            ? { desktop_bridge: true, ml: false, path: 'desktop-native-' + (detectorUsed || activeMethod) }
-            : { desktop_bridge: false, ml: false, path: 'web-' + (detectorUsed || activeMethod) });
-
-        // Pass the current frame's buffer through to matchNotes so the
-        // chord scorer can run on the same audio that was just analysed
-        // for pitch. The shared `pendingBuffer` is cleared by the timer
-        // (see detectInterval) before processFrame is called, so reading
-        // it later from matchNotes would either skip (null) or pick up a
-        // newer buffer captured mid-processing.
-        await matchNotes(buffer);
-
-        // Reference-recording capture: tap the same audio the detector
-        // just analysed. Cap, song-playing gate, and chunk accounting all
-        // live in _recCapture.pushFrame() (nd-carve-7 cut 7).
-        if (_recCapture.isArmed()) {
-            _recCapture.pushFrame(buffer, audioCtx ? audioCtx.sampleRate : (bridgeSampleRate || 44100));
-        }
-    }
 
     // ── Note matching ─────────────────────────────────────────────────
     function noteKey(note, time) {
@@ -6434,7 +5526,7 @@ function createNoteDetector(options = {}) {
         getTuningOffsets:       () => tuningOffsets,
         getLatencyOffset:       () => latencyOffset,
         getEnabled:             () => enabled,
-        getNdUsingEngineVerifier: () => ndUsingEngineVerifier,
+        getNdUsingEngineVerifier: () => _ndUsingEngineVerifier,
         getCapo:                () => capo,
         getPitchTolerance:      () => pitchTolerance,
         getTimingTolerance:     () => timingTolerance,
