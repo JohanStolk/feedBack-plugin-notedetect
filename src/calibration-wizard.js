@@ -1794,7 +1794,7 @@ export function createCalibrationWizard({
         };
         consider('inputGain', 'Input gain', getInputGain(), rec.inputGain,
             _calWizardFmtGain, rec.reasons && rec.reasons.inputGain);
-        consider('getLatencyOffset()', 'Detection delay', getLatencyOffset(), rec.latencyOffset,
+        consider('latencyOffset', 'Detection delay', getLatencyOffset(), rec.latencyOffset,
             _calWizardFmtLatencyMs, rec.reasons && rec.reasons.latencyOffset);
         return changes;
     }

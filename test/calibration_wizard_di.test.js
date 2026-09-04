@@ -391,6 +391,170 @@ test('hygiene(C): _calWizardClearPauseRetries clears pause-retry setTimeout IDs 
     // timeouts still contains all retryIds → the assertions above fail.
 });
 
+// 4. Review key-mismatch regression (Creed r1 on cut 8).
+//    Bug introduced by mechanical DI substitution: consider('getLatencyOffset()', ...)
+//    → data-key="getLatencyOffset()" in the review checkbox → unchecking writes
+//    applyChecked['getLatencyOffset()'] = false while applyChecked.latencyOffset
+//    stays true → setLatencyOffset fires anyway.
+//    Fix: consider('latencyOffset', ...).
+//
+//    Two discriminating tests:
+//    4a: step-7 renders data-key="latencyOffset" in the checkbox HTML.
+//        Red-proof against c1be48e: data-key="getLatencyOffset()" → assertion fails.
+//    4b: uncheck latency via realistic onchange path → setLatencyOffset not called;
+//        leave checked → called with 0.05.
+//        Red-proof against c1be48e (bug): onchange writes applyChecked['getLatencyOffset()'],
+//        applyChecked.latencyOffset stays true → setLatencyOffset fires → assert.equal(calls,0) fails.
+
+// Helper: create an intercepting body element whose innerHTML setter captures
+// the data-key value from rendered .nd-cal-apply-chk checkboxes, and whose
+// querySelectorAll('.nd-cal-apply-chk') returns a mock checkbox wired to that key.
+function makeInterceptingBodyAndCheckbox() {
+    let checkboxKey = null;
+    const mockChk = {
+        getAttribute: (attr) => attr === 'data-key' ? checkboxKey : null,
+        checked: true,
+        onchange: null,
+    };
+    const bodyKids = new Map();
+    const bodyEl = {
+        className: '', textContent: '', value: '', style: {}, dataset: {},
+        isConnected: true, onclick: null, onchange: null,
+        appendChild: () => {}, remove: () => {}, closest: () => null,
+        getAttribute: () => null,
+        classList: { add: () => {}, remove: () => {}, contains: () => false },
+        get innerHTML() { return this._html || ''; },
+        set innerHTML(v) {
+            this._html = v;
+            // capture the data-key attribute from the first rendered checkbox
+            const m = v.match(/nd-cal-apply-chk[^>]*?data-key="([^"]+)"/);
+            checkboxKey = m ? m[1] : null;
+        },
+        querySelectorAll(sel) {
+            if (sel === '.nd-cal-apply-chk') return [mockChk];
+            return [];
+        },
+        querySelector(sel) {
+            if (!bodyKids.has(sel)) bodyKids.set(sel, makeStableEl());
+            return bodyKids.get(sel);
+        },
+    };
+    return { bodyEl, mockChk, getCheckboxKey: () => checkboxKey };
+}
+
+test('review key mismatch (4a): step-7 renders data-key="latencyOffset" not the accessor call string', () => {
+    const { bodyEl, getCheckboxKey } = makeInterceptingBodyAndCheckbox();
+
+    // Overlay element pre-wires bodyEl into .nd-cal-body slot
+    const overlayKids = new Map();
+    overlayKids.set('.nd-cal-body', bodyEl);
+    const overlayEl = {
+        ...makeStableEl(),
+        querySelector(sel) {
+            if (!overlayKids.has(sel)) overlayKids.set(sel, makeStableEl());
+            return overlayKids.get(sel);
+        },
+    };
+
+    // timingMedianMs=100, latencyOffset=0 → recommendation: latencyOffset=0.05
+    const diagStub = {
+        buildDiagnosticPayload: () => ({ timing_error_ms_hits: { median: 100, count: 30 } }),
+        resetTimingErrors: () => {},
+    };
+
+    const { createCalibrationWizard } = loadModule({
+        document: {
+            createElement: () => overlayEl,
+            body: { appendChild: () => {}, querySelector: () => null, querySelectorAll: () => [] },
+        },
+    });
+
+    const wiz = createCalibrationWizard(makeAcc({
+        getEnabled:       () => true,
+        getLatencyOffset: () => 0,
+        getDiagCatalog:   () => diagStub,
+    }));
+
+    wiz.openCalibrationWizard();
+    for (let i = 0; i < 7; i++) wiz.calibrationWizardNext();
+
+    // step-7 renders review checkboxes; inspect captured data-key
+    assert.equal(getCheckboxKey(), 'latencyOffset',
+        'step-7 must render data-key="latencyOffset" — not the DI-accessor call string');
+    // Red-proof: c1be48e has consider("getLatencyOffset()", ...) → data-key="getLatencyOffset()" → fails
+});
+
+test('review key mismatch (4b): uncheck latency → setLatencyOffset not called; leave checked → called', () => {
+    // PART A: uncheck → NOT called
+    const { bodyEl: bodyA, mockChk: chkA, getCheckboxKey: keyA } = makeInterceptingBodyAndCheckbox();
+    const overlayKidsA = new Map();
+    overlayKidsA.set('.nd-cal-body', bodyA);
+    const overlayA = { ...makeStableEl(), querySelector(s) { if (!overlayKidsA.has(s)) overlayKidsA.set(s, makeStableEl()); return overlayKidsA.get(s); } };
+
+    let createsA = 0;
+    const diagStub = {
+        buildDiagnosticPayload: () => ({ timing_error_ms_hits: { median: 100, count: 30 } }),
+        resetTimingErrors: () => {},
+    };
+    const latencyCallsA = [];
+
+    const { createCalibrationWizard: cwA } = loadModule({
+        document: { createElement: () => overlayA, body: { appendChild: () => {}, querySelector: () => null, querySelectorAll: () => [] } },
+    });
+
+    const wizA = cwA(makeAcc({
+        getEnabled:       () => true,
+        getLatencyOffset: () => 0,
+        getDiagCatalog:   () => diagStub,
+        setLatencyOffset: (v) => { latencyCallsA.push(v); },
+    }));
+
+    wizA.openCalibrationWizard();
+    for (let i = 0; i < 7; i++) wizA.calibrationWizardNext();  // → step 7
+
+    // step-7 wires chkA.onchange via querySelectorAll; simulate uncheck
+    assert.equal(typeof chkA.onchange, 'function', 'chkA.onchange must be wired after step-7 render');
+    chkA.checked = false;
+    chkA.onchange();  // writes applyChecked[key] = false
+
+    wizA.calibrationWizardNext();  // → step 8
+
+    // click Apply Recommended Settings
+    bodyA.querySelector('.nd-cal-apply-safe').onclick();
+
+    assert.equal(latencyCallsA.length, 0,
+        'unchecked latency: setLatencyOffset must NOT fire (key mismatch would leave applyChecked.latencyOffset=true)');
+    // Red-proof: c1be48e → chkA.onchange writes applyChecked["getLatencyOffset()"],
+    // applyChecked.latencyOffset stays true → setLatencyOffset fires → latencyCallsA.length===1 → fails
+
+    // PART B: leave checked (default) → MUST be called with 0.05
+    const { bodyEl: bodyB, mockChk: chkB } = makeInterceptingBodyAndCheckbox();
+    const overlayKidsB = new Map();
+    overlayKidsB.set('.nd-cal-body', bodyB);
+    const overlayB = { ...makeStableEl(), querySelector(s) { if (!overlayKidsB.has(s)) overlayKidsB.set(s, makeStableEl()); return overlayKidsB.get(s); } };
+    const latencyCallsB = [];
+
+    const { createCalibrationWizard: cwB } = loadModule({
+        document: { createElement: () => overlayB, body: { appendChild: () => {}, querySelector: () => null, querySelectorAll: () => [] } },
+    });
+
+    const wizB = cwB(makeAcc({
+        getEnabled:       () => true,
+        getLatencyOffset: () => 0,
+        getDiagCatalog:   () => diagStub,
+        setLatencyOffset: (v) => { latencyCallsB.push(v); },
+    }));
+
+    wizB.openCalibrationWizard();
+    for (let i = 0; i < 8; i++) wizB.calibrationWizardNext();  // step 7→8 without uncheck
+    bodyB.querySelector('.nd-cal-apply-safe').onclick();
+
+    assert.equal(latencyCallsB.length, 1,
+        'checked latency (default): setLatencyOffset must be called exactly once');
+    assert.equal(latencyCallsB[0], 0.05,
+        'setLatencyOffset must receive the recommended value: 0.05 (delta=100ms*0.5=0.05s)');
+});
+
 // 2. getEnabled() — live in getCalibrationSnapshot() → snap.enabled
 test('getEnabled() live: snapshot.enabled reflects swapped value', () => {
     const { createCalibrationWizard } = loadModule();
