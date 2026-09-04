@@ -154,6 +154,31 @@ function makeSandbox() {
             return function release() { self._releaseCount++; };
         },
     };
+    // feedBack event-bus stub — parallel to the slopsmith stub above.
+    // feedBack.on/off/emit handlers receive the raw payload (not {detail}-wrapped).
+    const _fbListeners = new Map();
+    sandbox.feedBack = {
+        on(event, fn) {
+            if (!_fbListeners.has(event)) _fbListeners.set(event, []);
+            _fbListeners.get(event).push(fn);
+        },
+        off(event, fn) {
+            const arr = _fbListeners.get(event);
+            if (!arr) return;
+            const idx = arr.indexOf(fn);
+            if (idx !== -1) arr.splice(idx, 1);
+        },
+        // Fire with raw payload (feedBack.on handlers receive payload directly).
+        _fire(event, payload) {
+            const arr = _fbListeners.get(event);
+            if (!arr) return;
+            for (const fn of arr.slice()) fn(payload);
+        },
+        _listenerCount(event) {
+            const arr = _fbListeners.get(event);
+            return arr ? arr.length : 0;
+        },
+    };
     // window must reference the sandbox itself so the plugin's
     // `window.playSong = ...` assignments and reads work. Some tests
     // also look up `window.noteDetect` / `window.createNoteDetector`

@@ -12203,6 +12203,7 @@ function createNoteDetector(options = {}) {
     let _extActive = false;
     let _extOnHit = null, _extOnMiss = null, _extWatchOpen = null, _extWatchClose = null;
     let _extPending = [];   // verdicts seen before external mode fully armed (flushed on activate)
+    let _vocalOnHit = null, _vocalOnMiss = null;  // feedBack note:hit/miss — vocal highway path
 
     function _extScan() {
         const nd = window.slopsmith && window.slopsmith.noteDetection;
@@ -12266,6 +12267,70 @@ function createNoteDetector(options = {}) {
             if (_extOnMiss) window.slopsmith.off('note-detection:miss', _extOnMiss);
         } catch (_) {}
         _extOnHit = _extOnMiss = null;
+    }
+
+    // Vocal arrangements (vocal/vocals/sing/karaoke) are scored by Vocal Highway,
+    // which emits note:hit / note:miss on window.feedBack. The mic is never started.
+    function _ndIsVocalArrangement() {
+        try {
+            const info = (resolveHw() && hw.getSongInfo) ? hw.getSongInfo() : null;
+            const name = info && info.arrangement;
+            return !!(name && /\b(vocal|vocals|sing|karaoke)\b/i.test(String(name)));
+        } catch (_) { return false; }
+    }
+
+    // Parallel to _extFeed — adapts VH's {source, noteTime} payload shape (no midi).
+    function _vocalFeed(payload, hit) {
+        if (!_extActive) {
+            if (detectPreference && _extPending.length < 128)
+                _extPending.push({ hit, _vocal: true, noteTime: (payload && payload.noteTime) || 0 });
+            return;
+        }
+        const noteTime = (payload && Number.isFinite(payload.noteTime)) ? payload.noteTime
+            : ((resolveHw() && hw.getTime) ? hw.getTime() : 0);
+        const key = 'ext:voc:' + Number(noteTime).toFixed(3) + ':' + (hit ? 'h' : 'm');
+        try {
+            recordJudgment(key, { hit: !!hit, detectedMidi: null, noteTime, _external: true },
+                { count: true, emit: true });
+        } catch (_) {}
+    }
+
+    function _vocalSubscribe() {
+        if (_vocalOnHit) return;
+        _vocalOnHit  = (p) => { if (p && p.source === 'vocal_highway') _vocalFeed(p, true);  };
+        _vocalOnMiss = (p) => { if (p && p.source === 'vocal_highway') _vocalFeed(p, false); };
+        try {
+            const fb = window.feedBack;
+            if (fb && typeof fb.on === 'function') {
+                fb.on('note:hit',  _vocalOnHit);
+                fb.on('note:miss', _vocalOnMiss);
+            }
+        } catch (_) {}
+    }
+    function _vocalUnsubscribe() {
+        try {
+            const fb = window.feedBack;
+            if (fb && typeof fb.off === 'function') {
+                if (_vocalOnHit)  fb.off('note:hit',  _vocalOnHit);
+                if (_vocalOnMiss) fb.off('note:miss', _vocalOnMiss);
+            }
+        } catch (_) {}
+        _vocalOnHit = _vocalOnMiss = null;
+    }
+
+    // enableImpl() has already set enabled=true and run the event bindings.
+    function _enableVocal() {
+        _extActive = true;
+        attachInstanceRoot();
+        updateButton();
+        _hud.startHUD();
+        _vocalSubscribe();
+        // Flush any verdicts buffered before _extActive was set.
+        if (_extPending.length) {
+            const pend = _extPending; _extPending = [];
+            for (const v of pend) _vocalFeed({ noteTime: v.noteTime || 0 }, v.hit);
+        }
+        return true;
     }
 
     // enableImpl() has already set enabled=true and run the event bindings.
@@ -12379,6 +12444,11 @@ function createNoteDetector(options = {}) {
         _chartStateBindEvents();
 
         resetScoring();
+
+        // Vocal arrangements: Vocal Highway is the scorer; nd only displays
+        // the HUD. Skip the mic entirely and route feedBack note:hit/miss
+        // into the shared graded HUD + summary.
+        if (_ndIsVocalArrangement()) return _enableVocal();
 
         // External detection source (MIDI keys highway): score from the
         // note-detection domain instead of the mic — same graded HUD + summary.
@@ -12530,7 +12600,7 @@ function createNoteDetector(options = {}) {
         // unsubscribes (to avoid dropping first-note verdicts on reconnect),
         // so disable() is responsible for the full subscription teardown.
         // _extSubscribe() re-runs when the next enable() reaches _enableExternal.
-        _extActive = false; _extUnsubscribe();
+        _extActive = false; _extUnsubscribe(); _vocalUnsubscribe();
         // Auto-record is the one enable-bound listener we drop on disable()
         // (not only on destroy): its handler arms/saves takes, so it must
         // not stay live while Detect is off. Re-enable rebinds it.
