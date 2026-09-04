@@ -20,6 +20,9 @@
 //     getPitchTolerance, getTimingTolerance, getChordHitRatio
 //
 //   Stable values / function refs (safe to capture at construction):
+//     ndVersion              — main.js const _ND_VERSION (plugin version string)
+//     ndVerifyHarmonicSnr   — main.js const _ND_VERIFY_HARMONIC_SNR (verify threshold)
+//     ndVerifyPitchCents    — main.js const _ND_VERIFY_PITCH_CENTS (verify threshold)
 //     diagCatalog           — factory-level const object, never reassigned
 //     ndBridgeScoreAvailable — factory-level function ref, never reassigned
 //     ndBridgeScoreChord    — factory-level function ref, never reassigned
@@ -43,6 +46,9 @@ export function createTechniqueAssessment({
     getPitchTolerance,
     getTimingTolerance,
     getChordHitRatio,
+    ndVersion,
+    ndVerifyHarmonicSnr,
+    ndVerifyPitchCents,
     diagCatalog,
     ndBridgeScoreAvailable,
     ndBridgeScoreChord,
@@ -658,7 +664,7 @@ export function createTechniqueAssessment({
     }
 
     function _calLabTickFromResult(r, flags) {
-        const harmonicSnr = _ND_VERIFY_HARMONIC_SNR;
+        const harmonicSnr = ndVerifyHarmonicSnr;
         const snr = Number.isFinite(r && r.bandEnergy) ? r.bandEnergy : 0;
         const pitchTol = _calLabEffectivePitchTol(getPitchTolerance(), flags || {});
         const passedSnr = snr >= harmonicSnr;
@@ -991,7 +997,7 @@ export function createTechniqueAssessment({
             minHitRatio: getChordHitRatio(),
             bypassMl: true,
             harmonicVerify: true,
-            harmonicSnr: _ND_VERIFY_HARMONIC_SNR,
+            harmonicSnr: ndVerifyHarmonicSnr,
             notes: notes.map((n) => ({
                 s: n.s,
                 f: n.f,
@@ -1221,15 +1227,15 @@ export function createTechniqueAssessment({
         const report = {
             schema: _CAL_LAB_SCHEMA,
             timestamp: new Date().toISOString(),
-            plugin_version: _ND_VERSION,
+            plugin_version: ndVersion,
             assessment_mode: st.mode || null,
             calibration_notes: [
                 'Half bends and whole bends use the same native bend probe (G string fret 7, bend flag); labels distinguish technique captures only.',
             ],
             settings: {
-                harmonic_snr_used: _ND_VERIFY_HARMONIC_SNR,
+                harmonic_snr_used: ndVerifyHarmonicSnr,
                 pitch_tolerance_cents: getPitchTolerance(),
-                pitch_check_cents_verify: _ND_VERIFY_PITCH_CENTS,
+                pitch_check_cents_verify: ndVerifyPitchCents,
                 timing_tolerance_s: getTimingTolerance(),
                 latency_offset_s: getLatencyOffset(),
                 input_gain: getInputGain(),
@@ -1871,7 +1877,9 @@ export function createTechniqueAssessment({
     function getCalibrationReport() {
         try {
             return _calLabLastReport || (_calLabState ? _calLabBuildReport() : null);
-        } catch (_) {
+        } catch (err) {
+            // ponytail: log so a future free-identifier leak isn't silently swallowed
+            typeof console !== 'undefined' && console.error('[technique-assessment] getCalibrationReport error:', err);
             return null;
         }
     }

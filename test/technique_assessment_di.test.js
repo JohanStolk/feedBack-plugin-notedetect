@@ -30,6 +30,7 @@
 //       tick fires only when _calLabEl.isConnected in a real document.
 //
 //   STABLE (not live accessors — correctly captured at construction):
+//     ndVersion, ndVerifyHarmonicSnr, ndVerifyPitchCents,
 //     diagCatalog, ndBridgeScoreAvailable, ndBridgeScoreChord,
 //     ndMidiFromStringFret, ndMidiToName, calibrationFormatLevel,
 //     getCalibrationSnapshot.
@@ -57,6 +58,9 @@ function loadModule(ctxOverrides = {}) {
 
     const baseCtx = {
         // stable refs
+        ndVersion:             'test-version',
+        ndVerifyHarmonicSnr:   10,
+        ndVerifyPitchCents:    50,
         diagCatalog:           defaultDiagCatalog,
         ndBridgeScoreAvailable: () => false,
         ndBridgeScoreChord:    async () => null,
@@ -119,9 +123,6 @@ function loadModule(ctxOverrides = {}) {
         clearInterval: () => {},
         URL: { createObjectURL: () => 'blob:', revokeObjectURL: () => {} },
         fetch: async () => ({ ok: true, json: async () => ({}) }),
-        _ND_VERSION: 'test',
-        _ND_VERIFY_HARMONIC_SNR: 10,
-        _ND_VERIFY_PITCH_CENTS: 50,
         console,
     });
 
@@ -172,6 +173,12 @@ function openLabAndGetState(ctx) {
         getEnabled:             ctx.getEnabled,
         getNdUsingEngineVerifier: ctx.getNdUsingEngineVerifier,
         getCapo:                ctx.getCapo,
+        getPitchTolerance:      ctx.getPitchTolerance,
+        getTimingTolerance:     ctx.getTimingTolerance,
+        getChordHitRatio:       ctx.getChordHitRatio,
+        ndVersion:              ctx.ndVersion,
+        ndVerifyHarmonicSnr:    ctx.ndVerifyHarmonicSnr,
+        ndVerifyPitchCents:     ctx.ndVerifyPitchCents,
         diagCatalog:            ctx.diagCatalog,
         ndBridgeScoreAvailable: ctx.ndBridgeScoreAvailable,
         ndBridgeScoreChord:     ctx.ndBridgeScoreChord,
@@ -227,6 +234,9 @@ function makeInstance(overrides = {}) {
         getPitchTolerance:      () => 50,
         getTimingTolerance:     () => 0.150,
         getChordHitRatio:       () => 0.40,
+        ndVersion:              'test-version',
+        ndVerifyHarmonicSnr:    10,
+        ndVerifyPitchCents:     50,
         diagCatalog:            { getDiagDetector: () => null },
         ndBridgeScoreAvailable: () => false,
         ndBridgeScoreChord:     async () => null,
@@ -267,6 +277,7 @@ test('factory returns the 5 public API methods', () => {
         getCurrentStringCount: () => 6, getTuningOffsets: () => [], getLatencyOffset: () => 0,
         getEnabled: () => false, getNdUsingEngineVerifier: () => false, getCapo: () => 0,
         getPitchTolerance: () => 50, getTimingTolerance: () => 0.15, getChordHitRatio: () => 0.4,
+        ndVersion: 'test', ndVerifyHarmonicSnr: 10, ndVerifyPitchCents: 50,
         diagCatalog: { getDiagDetector: () => null }, ndBridgeScoreAvailable: () => false,
         ndBridgeScoreChord: async () => null, ndMidiFromStringFret: () => 40,
         ndMidiToName: (m) => String(m), calibrationFormatLevel: () => '0%',
@@ -288,6 +299,7 @@ test('getCalibrationReport returns null before lab is opened', () => {
         getCurrentStringCount: () => 6, getTuningOffsets: () => [], getLatencyOffset: () => 0,
         getEnabled: () => false, getNdUsingEngineVerifier: () => false, getCapo: () => 0,
         getPitchTolerance: () => 50, getTimingTolerance: () => 0.15, getChordHitRatio: () => 0.4,
+        ndVersion: 'test', ndVerifyHarmonicSnr: 10, ndVerifyPitchCents: 50,
         diagCatalog: { getDiagDetector: () => null }, ndBridgeScoreAvailable: () => false,
         ndBridgeScoreChord: async () => null, ndMidiFromStringFret: () => 40,
         ndMidiToName: (m) => String(m), calibrationFormatLevel: () => '0%',
@@ -436,6 +448,7 @@ test('getPitchTolerance: live swap — report reflects swapped value', () => {
         getNdUsingEngineVerifier: () => false, getCapo: () => 0,
         getPitchTolerance: () => pitchTol,
         getTimingTolerance: () => 0.15, getChordHitRatio: () => 0.4,
+        ndVersion: 'test', ndVerifyHarmonicSnr: 10, ndVerifyPitchCents: 50,
         diagCatalog: { getDiagDetector: () => null }, ndBridgeScoreAvailable: () => false,
         ndBridgeScoreChord: async () => null, ndMidiFromStringFret: () => 40,
         ndMidiToName: (m) => String(m), calibrationFormatLevel: () => '0%',
@@ -468,6 +481,7 @@ test('getTimingTolerance: live swap — report reflects swapped value', () => {
         getNdUsingEngineVerifier: () => false, getCapo: () => 0,
         getPitchTolerance: () => 50, getTimingTolerance: () => timingTol,
         getChordHitRatio: () => 0.4,
+        ndVersion: 'test', ndVerifyHarmonicSnr: 10, ndVerifyPitchCents: 50,
         diagCatalog: { getDiagDetector: () => null }, ndBridgeScoreAvailable: () => false,
         ndBridgeScoreChord: async () => null, ndMidiFromStringFret: () => 40,
         ndMidiToName: (m) => String(m), calibrationFormatLevel: () => '0%',
@@ -482,4 +496,76 @@ test('getTimingTolerance: live swap — report reflects swapped value', () => {
     assert.ok(report);
     assert.equal(report.settings.timing_tolerance_s, 0.200,
         'getTimingTolerance swap not reflected — value was captured at construction');
+});
+
+// Test 14 (CLASS-KILLER): real ESM import — no vm, no injected globals.
+// Any free identifier in technique-assessment.js that is neither a DI param
+// nor a local declaration will throw ReferenceError here, exactly as it would
+// in a browser ESM context.
+//
+// Red-proof (e297b37): with the vm globals still injected, the module loaded
+// via vm and the test below would have passed even though `_ND_VERSION` etc.
+// were free. On e297b37, deleting those vm globals from the context caused the
+// vm tests to pass (globals still present) — the false environment was the vm
+// context itself. On this commit the real import path is the ground truth:
+// if a free identifier exists, `import()` throws synchronously and
+// getCalibrationReport() would throw inside _calLabBuildReport().
+test('real ESM import: getCalibrationReport returns non-null with plugin_version (class-killer)', async () => {
+    const modPath = path.join(__dirname, '..', 'src', 'technique-assessment.js');
+    const { createTechniqueAssessment } = await import(modPath);
+
+    // Minimal document stub so openInstrumentCalibrationLab() can mount its overlay
+    const makeStubEl = () => {
+        const el = {
+            className: '', textContent: '', style: {}, dataset: {},
+            isConnected: true, onclick: null, onchange: null, hidden: false,
+            appendChild: () => {}, remove: () => {},
+            closest: () => null, getAttribute: () => null, setAttribute: () => {},
+            classList: { add: () => {}, remove: () => {}, contains: () => false, toggle: () => {} },
+            insertAdjacentHTML: () => {},
+            get innerHTML() { return this._html || ''; },
+            set innerHTML(v) { this._html = v; },
+            querySelector: () => makeStubEl(),
+            querySelectorAll: () => [],
+        };
+        return el;
+    };
+    global.document = {
+        createElement: () => makeStubEl(),
+        body: { appendChild: () => {}, querySelector: () => null, querySelectorAll: () => [] },
+    };
+
+    try {
+        const inst = createTechniqueAssessment({
+            getUsingDesktopBridge: () => false, getDetectionMethod: () => 'hps',
+            getSelectedChannel: () => 0, getInputGain: () => 1, getCurrentArrangement: () => 0,
+            getCurrentStringCount: () => 6, getTuningOffsets: () => [0,0,0,0,0,0],
+            getLatencyOffset: () => 0, getEnabled: () => false,
+            getNdUsingEngineVerifier: () => false, getCapo: () => 0,
+            getPitchTolerance: () => 50, getTimingTolerance: () => 0.15,
+            getChordHitRatio: () => 0.4,
+            ndVersion: '1.33.0',
+            ndVerifyHarmonicSnr: 3.0,
+            ndVerifyPitchCents: 50,
+            diagCatalog: { getDiagDetector: () => null },
+            ndBridgeScoreAvailable: () => false,
+            ndBridgeScoreChord: async () => null,
+            ndMidiFromStringFret: () => 40,
+            ndMidiToName: (m) => String(m),
+            calibrationFormatLevel: () => '0%',
+            getCalibrationSnapshot: () => ({
+                sampleRateHz: 48000, channel: 0, source: 'default',
+                avOffsetMs: 0, inputLevelPct: 0, inputPeakPct: 0,
+            }),
+        });
+        inst.openInstrumentCalibrationLab();
+        const report = inst.getCalibrationReport();
+        assert.ok(report !== null, 'getCalibrationReport() returned null — _calLabBuildReport threw (free identifier?)');
+        assert.equal(typeof report.plugin_version, 'string',
+            'report.plugin_version not a string — ndVersion free identifier not resolved');
+        assert.equal(report.plugin_version, '1.33.0',
+            'report.plugin_version did not receive ndVersion DI param');
+    } finally {
+        delete global.document;
+    }
 });

@@ -6439,7 +6439,10 @@ function createNoteDetector(options = {}) {
         getPitchTolerance:      () => pitchTolerance,
         getTimingTolerance:     () => timingTolerance,
         getChordHitRatio:       () => chordHitRatio,
-        // stable refs
+        // stable refs (constants safe to capture at construction)
+        ndVersion:              _ND_VERSION,
+        ndVerifyHarmonicSnr:    _ND_VERIFY_HARMONIC_SNR,
+        ndVerifyPitchCents:     _ND_VERIFY_PITCH_CENTS,
         diagCatalog:            _diagCatalog,
         ndBridgeScoreAvailable: _ndBridgeScoreAvailable,
         ndBridgeScoreChord:     _ndBridgeScoreChord,
