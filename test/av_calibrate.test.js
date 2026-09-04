@@ -225,17 +225,22 @@ test('DI-shape: song:ended drives runAutoCalibrate through getDetectPreference w
 
 // (c) DI-shape via completed sweep: exercises all 6 sweep-accessor DI params
 //     (getCurrentArrangement, getCurrentStringCount, getTuningOffsets, getCapo,
-//     getTimingHitThreshold, getPitchTolerance) plus calibrationNotes and
-//     calibrateOffsetMs. Creed r2: deleting getCapo kept all tests green.
+//     getTimingHitThreshold, getPitchTolerance) plus calibrationNotes,
+//     calibrateOffsetMs, and dispatchInstanceEvent. Creed r2: deleting getCapo
+//     kept all tests green; Creed r3: deleting dispatchInstanceEvent also stayed
+//     green (setAvOffsetMs runs before dispatchInstanceEvent in the try block, so
+//     done=true and calledWithMs are set even when the catch fires).
 //
 //     Recipe: guitar string 0 fret 0 = E2 = MIDI 40; _calSeedForTest seeds m:40.
 //     At offset 0 ms all 12 detections land exactly at their note times → sweep
-//     returns {offsetMs:0, matched:12, total:12} → setAvOffsetMs called → done=true.
+//     returns {offsetMs:0, matched:12, total:12} → setAvOffsetMs called → done=true
+//     → dispatchInstanceEvent fires → slopsmith.emit('notedetect:calibrated') runs.
 //
-//     With any missing sweep accessor: TypeError during _ndCalibrateOffsetMs
-//     geometry construction or sweep → runAutoCalibrate returns early → done=false →
-//     assert fails (RED).
-test('DI-shape: completed sweep exercises all 6 sweep-accessor DI params (Creed r2 — getCapo)', () => {
+//     With missing sweep accessor (getCapo, etc.): TypeError in calibrateOffsetMs
+//     geometry → runAutoCalibrate returns early → done=false → RED.
+//     With dispatchInstanceEvent deleted: try-block throws at line 83 before
+//     slopsmith.emit → calibratedFired stays false → RED.
+test('DI-shape: completed sweep exercises all sweep DI params incl. dispatchInstanceEvent (Creed r2/r3)', () => {
     const core = loadDetectionCore();
     const sandboxRef = core._sandbox;
 
@@ -257,7 +262,15 @@ test('DI-shape: completed sweep exercises all 6 sweep-accessor DI params (Creed 
     det._calSeedForTest(12);
 
     // Fire the sweep directly (no audio pipeline needed).
-    det._runAutoCalibrate();
+    // The return value distinguishes the OK path from the error catch:
+    //   'OK ...'             → dispatchInstanceEvent called and returned normally
+    //   'setAvOffsetMs threw: ...' → dispatchInstanceEvent deleted/undefined → TypeError
+    //                               caught by outer try-catch (after setAvOffsetMs ran)
+    // Note: window.dispatchEvent is absent in the vm sandbox so dispatchInstanceEvent's
+    // inner try-catches eat the TypeError silently — the function returns normally.
+    // With dispatchInstanceEvent deleted from the DI object: calling undefined() throws
+    // BEFORE the inner try-catches, so the outer catch fires → 'setAvOffsetMs threw:'.
+    const sweepResult = det._runAutoCalibrate();
 
     // If any sweep DI accessor is missing (e.g. getCapo deleted): calibrateOffsetMs
     // throws TypeError building the geom object → caught → done stays false → RED.
@@ -265,6 +278,10 @@ test('DI-shape: completed sweep exercises all 6 sweep-accessor DI params (Creed 
         'sweep must complete: _calDoneThisPlay=true after a 12/12 note match');
     assert.equal(typeof calledWithMs, 'number',
         'setAvOffsetMs must be called with a number (sweep result.offsetMs)');
+    // dispatchInstanceEvent must return normally (not be undefined/missing).
+    // Deleted → outer catch fires → 'setAvOffsetMs threw: TypeError: ...' → RED.
+    assert.ok(sweepResult && sweepResult.startsWith('OK '),
+        `runAutoCalibrate must return OK path — dispatchInstanceEvent must not throw (got: ${sweepResult})`);
 
     det.destroy();
 });
