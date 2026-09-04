@@ -535,8 +535,13 @@ test('real ESM import: getCalibrationReport returns non-null with plugin_version
         body: { appendChild: () => {}, querySelector: () => null, querySelectorAll: () => [] },
     };
 
+    // Declare inst outside try so the finally can call calibrationLabClose()
+    // to clearInterval(_calLabTick) — openInstrumentCalibrationLab starts a
+    // setInterval that keeps the event loop alive; without the close call the
+    // node --test process never exits.
+    let inst;
     try {
-        const inst = createTechniqueAssessment({
+        inst = createTechniqueAssessment({
             getUsingDesktopBridge: () => false, getDetectionMethod: () => 'hps',
             getSelectedChannel: () => 0, getInputGain: () => 1, getCurrentArrangement: () => 0,
             getCurrentStringCount: () => 6, getTuningOffsets: () => [0,0,0,0,0,0],
@@ -566,6 +571,7 @@ test('real ESM import: getCalibrationReport returns non-null with plugin_version
         assert.equal(report.plugin_version, '1.33.0',
             'report.plugin_version did not receive ndVersion DI param');
     } finally {
+        inst && inst.calibrationLabClose(); // clearInterval(_calLabTick) — prevents hang
         delete global.document;
     }
 });
