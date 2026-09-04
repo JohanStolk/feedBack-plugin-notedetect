@@ -30,7 +30,8 @@ const vm = require('node:vm');
 
 // Load createDiagnosticCatalog into a plain vm context with NO _ndShared /
 // _ndClearDiagnosticReturnState globals — those must be resolved through DI.
-function loadCatalog() {
+// Optional ctxOverrides lets tests inject spies (e.g. a fetch spy).
+function loadCatalog(ctxOverrides = {}) {
     const src = fs.readFileSync(
         path.join(__dirname, '..', 'src', 'diagnostic-catalog.js'),
         'utf8',
@@ -53,6 +54,7 @@ function loadCatalog() {
         console,
         setTimeout: () => 0,
         clearTimeout: () => {},
+        ...ctxOverrides,
     });
     vm.runInContext(stripped, ctx);
     return vm.runInContext('({fn: createDiagnosticCatalog})', ctx).fn;
@@ -310,9 +312,8 @@ test('getDetectionConfidenceMin() live accessor: buildDiagnosticPayload reads cu
     let val = 0.5;
     const cat = createDiagnosticCatalog(makeAccessors({ getDetectionConfidenceMin: () => val }));
     val = 0.65;
-    // confidence_min is not in payload currently — this accessor feeds getTuningMode logic;
-    // assert it doesn't capture at construction by verifying no throw from live read path.
-    assert.doesNotThrow(() => cat.buildDiagnosticPayload());
+    assert.equal(cat.buildDiagnosticPayload().settings.detection_confidence_min, 0.65,
+        'buildDiagnosticPayload must read getDetectionConfidenceMin() live');
 });
 
 test('getSelectedChannel() live accessor: buildDiagnosticPayload reads current channel', () => {
@@ -322,23 +323,54 @@ test('getSelectedChannel() live accessor: buildDiagnosticPayload reads current c
     assert.equal(cat.buildDiagnosticPayload().settings.channel, 1);
 });
 
-test('getTuningMode() live accessor: buildDiagnosticPayload reads current flag', () => {
-    // tuningMode feeds buildSessionHeader which is called from startLiveSession.
-    // buildDiagnosticPayload includes it indirectly — verify no capture by checking
-    // the accessor is callable post-swap.
-    let val = false;
-    const cat = createDiagnosticCatalog(makeAccessors({ getTuningMode: () => val }));
-    val = true;
-    // No throw on read = accessor is live.
-    assert.doesNotThrow(() => cat.buildDiagnosticPayload());
+test('getTuningMode() live accessor: recordDiagnostic streams only when live flag is set', () => {
+    // getTuningMode() / getRecArmedForTraining() are NOT read by buildDiagnosticPayload —
+    // they gate the streamLiveJudgment call inside recordDiagnostic (line 308).
+    // ponytail: test through recordDiagnostic + a fetch spy, with startLiveSession()
+    // to mint a non-null _liveSessionId so the gate can fire.
+    let tuningMode = false;
+    let fetchCalls = 0;
+    const fetchSpy = () => { fetchCalls++; return Promise.resolve({ ok: true }); };
+    const cat = loadCatalog({ fetch: fetchSpy })(
+        makeAccessors({ getTuningMode: () => tuningMode }),
+    );
+    // Mint a live session (consumes 1 fetch for the session-header POST).
+    cat.startLiveSession();
+    const beforeRecord = fetchCalls;
+
+    // With tuningMode=false, recordDiagnostic must NOT stream.
+    const j = { type: 'hit', note: { t: 1, s: 0, f: 5 }, detectedMidi: 60, confidence: 0.9,
+        timingError: 0, hit: true, chord: false };
+    cat.recordDiagnostic(j);
+    assert.equal(fetchCalls, beforeRecord, 'tuningMode=false: no stream call');
+
+    // Swap after construction — must see the new value.
+    tuningMode = true;
+    cat.recordDiagnostic(j);
+    assert.ok(fetchCalls > beforeRecord,
+        'getTuningMode() must be read live; swap to true must trigger stream');
 });
 
-test('getRecArmedForTraining() live accessor: buildDiagnosticPayload reads current flag', () => {
-    let val = false;
-    const cat = createDiagnosticCatalog(makeAccessors({ getRecArmedForTraining: () => val }));
-    val = true;
-    // rec_armed feeds buildSessionHeader — verify live (no throw = live accessor callable).
-    assert.doesNotThrow(() => cat.buildDiagnosticPayload());
+test('getRecArmedForTraining() live accessor: recordDiagnostic streams when arm flag is set', () => {
+    // Same pattern as getTuningMode — gates streamLiveJudgment inside recordDiagnostic.
+    let recArmed = false;
+    let fetchCalls = 0;
+    const fetchSpy = () => { fetchCalls++; return Promise.resolve({ ok: true }); };
+    const cat = loadCatalog({ fetch: fetchSpy })(
+        makeAccessors({ getRecArmedForTraining: () => recArmed }),
+    );
+    cat.startLiveSession();
+    const beforeRecord = fetchCalls;
+
+    const j = { type: 'miss', note: { t: 2, s: 1, f: 3 }, detectedMidi: null, confidence: 0,
+        timingError: 0.15, hit: false, chord: false };
+    cat.recordDiagnostic(j);
+    assert.equal(fetchCalls, beforeRecord, 'recArmed=false: no stream call');
+
+    recArmed = true;
+    cat.recordDiagnostic(j);
+    assert.ok(fetchCalls > beforeRecord,
+        'getRecArmedForTraining() must be read live; swap to true must trigger stream');
 });
 
 // ── getHw() live accessor ─────────────────────────────────────────────────────
