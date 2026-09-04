@@ -133,19 +133,95 @@ test('lifecycle: non-default instance never binds calibrate listeners', () => {
     det.destroy();
 });
 
-// ── LIVE-ACCESSOR RULE regression (cut 5) ────────────────────────────────────
-// Prove getHw is resolved at call time, not captured at createAvCalibrate()
-// construction. If the module captured hw.getNotes directly, mutating
-// core.highway after construction would be invisible and this test would fail.
-test('getHw accessor is resolved live after construction (lazy-dep regression)', () => {
+// ── LIVE-ACCESSOR RULE regression (cut 5, strengthened after Creed r1) ──────
+//
+// Creed r1 proved TWO gaps in the original property-mutation-only test:
+//
+//   Mutation 1 — IIFE capture: `getHw: (() => { const c=hw; return ()=>c; })()`
+//     Original test: mutates getNotes on the SAME object → still visible to
+//     the captured reference → all tests green, yet the real contract breaks
+//     (construct with window.highway=null, install after, enable → _calDebug()
+//     notes:-1, logDetection throws null.getTime at av-calibrate.js:52).
+//     Fixed by test (a) below: uses null-at-construction + enable() path.
+//
+//   Mutation 2 — omit getDetectPreference from DI:
+//     No test drove runAutoCalibrate() far enough to call getDetectPreference()
+//     → suite green, but det._runAutoCalibrate() throws TypeError immediately.
+//     Fixed by test (b) below: fires song:ended which calls runAutoCalibrate()
+//     through all three pre-sweep guards, including getDetectPreference().
+
+// (a) null-at-construction liveness — mirrors hud_lazy_hw.test.js pattern.
+//     IIFE-capture regression: hw=null captured forever → notes=-1 → RED.
+//     Correct () => hw: resolveHw() during enable() updates hw → notes=3 → GREEN.
+test('getHw: null at construction, hw installed before enable(), _calDebug reflects late stub', async () => {
+    const noop = () => {};
+    const audioNode = {
+        connect: noop, disconnect: noop,
+        gain: { value: 1 }, channelCount: 1,
+        fftSize: 0, smoothingTimeConstant: 0,
+        getFloatTimeDomainData: noop,
+    };
+    const fakeAudioCtx = {
+        sampleRate: 44100, state: 'running', destination: {},
+        createMediaStreamSource: () => audioNode,
+        createGain:              () => audioNode,
+        createAnalyser:          () => audioNode,
+        createScriptProcessor:   () => audioNode,
+    };
+    const fakeStream = { getTracks: () => [] };
+
+    // 1. Load with no highway in the sandbox.
+    const core = loadDetectionCore({ sandboxBeforeRun: (sb) => { sb.highway = null; } });
+    const sandboxRef = core._sandbox;
+
+    // 2. Construct detector while hw=null (factory: let hw = window.highway || null → null).
+    const det = sandboxRef.createNoteDetector({
+        isDefault: true, audioStream: fakeStream, audioCtx: fakeAudioCtx,
+    });
+
+    // 3. Install highway stub AFTER construction — the meaningful moment.
+    sandboxRef.highway = {
+        getTime: () => 0, getAvOffset: () => 0,
+        getNotes:         () => [1, 2, 3],
+        getChords:        () => [],
+        getFilteredNotes: () => [1, 2, 3],
+        getFilteredChords: () => [],
+        getSongInfo:      () => ({}), getStringCount: () => 6,
+        isDefaultRenderer: () => true, hasPhraseData: () => false,
+        getMastery:       () => 0, getSections: () => [],
+        addDrawHook: noop, removeDrawHook: noop,
+    };
+
+    // 4. enable() → resolveHw() finds the stub → hw updated in factory closure.
+    const ok = await det.enable();
+    assert.ok(ok, 'enable() must succeed with the audio mock');
+
+    // 5. _calDebug() calls getHw(); with live `() => hw`, hw is now the stub.
+    //    With IIFE-captured null: notes=-1. With correct accessor: notes=3.
+    assert.equal(det._calDebug().notes, 3,
+        'getHw is live: _calDebug().notes must reflect the late-installed stub, not captured null');
+
+    det.destroy();
+});
+
+// (b) DI-shape: fire song:ended → runAutoCalibrate() calls all 3 pre-sweep DI
+//     getters in order: getAutoCalibrate, getIsDefault, getDetectPreference.
+//     If getDetectPreference is deleted from DI (Creed r1 mutation 2), the
+//     song:ended handler throws TypeError and this test fails (RED).
+//     With correct DI: passes all guards, returns 'no window.setAvOffsetMs'
+//     (no sweep), done stays false (GREEN).
+test('DI-shape: song:ended drives runAutoCalibrate through getDetectPreference without throw', () => {
     const core = loadDetectionCore();
     const det = core.createNoteDetector({ isDefault: true });
-    // Initial stub returns []
-    assert.equal(det._calDebug().notes, 0, 'notes = 0 from initial stub');
-    // Mutate the highway stub after construction — live accessor must see it
-    const original = core.highway.getNotes;
-    core.highway.getNotes = () => [1, 2, 3];
-    assert.equal(det._calDebug().notes, 3, 'getHw is live: sees updated getNotes post-construction');
-    core.highway.getNotes = original;  // restore for sibling tests
+    det._bindCalEvents();
+    // song:ended → _calOnEnded → runAutoCalibrate() → getDetectPreference() (3rd guard)
+    // → returns 'no window.setAvOffsetMs' (setAvOffsetMs absent in vm) without throwing.
+    // Missing getDetectPreference: TypeError propagates through _fire → test fails.
+    assert.doesNotThrow(
+        () => core.slopsmith._fire('song:ended', {}),
+        'all DI getters must be callable via song:ended → runAutoCalibrate (incl. getDetectPreference)'
+    );
+    assert.equal(det._calState().done, false,
+        'done stays false when setAvOffsetMs absent (sweep guard fires before _calDoneThisPlay = true)');
     det.destroy();
 });
