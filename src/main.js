@@ -12297,8 +12297,9 @@ function createNoteDetector(options = {}) {
 
     function _vocalSubscribe() {
         if (_vocalOnHit) return;
-        _vocalOnHit  = (p) => { if (p && p.source === 'vocal_highway') _vocalFeed(p, true);  };
-        _vocalOnMiss = (p) => { if (p && p.source === 'vocal_highway') _vocalFeed(p, false); };
+        // feedBack.on handlers receive a CustomEvent (app.js:769-772); payload is at e.detail.
+        _vocalOnHit  = (p) => { const d = (p && p.detail) || p; if (d && d.source === 'vocal_highway') _vocalFeed(d, true);  };
+        _vocalOnMiss = (p) => { const d = (p && p.detail) || p; if (d && d.source === 'vocal_highway') _vocalFeed(d, false); };
         try {
             const fb = window.feedBack;
             if (fb && typeof fb.on === 'function') {

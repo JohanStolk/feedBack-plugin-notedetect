@@ -154,8 +154,10 @@ function makeSandbox() {
             return function release() { self._releaseCount++; };
         },
     };
-    // feedBack event-bus stub — parallel to the slopsmith stub above.
-    // feedBack.on/off/emit handlers receive the raw payload (not {detail}-wrapped).
+    // feedBack event-bus stub — mirrors the real bus in static/app.js:
+    //   emit(e, detail) → dispatchEvent(new CustomEvent(e, { detail }))   (app.js:769)
+    //   on(e, fn)       → addEventListener(e, fn)                         (app.js:772)
+    // Handlers therefore receive a CustomEvent; payload is at event.detail.
     const _fbListeners = new Map();
     sandbox.feedBack = {
         on(event, fn) {
@@ -168,11 +170,11 @@ function makeSandbox() {
             const idx = arr.indexOf(fn);
             if (idx !== -1) arr.splice(idx, 1);
         },
-        // Fire with raw payload (feedBack.on handlers receive payload directly).
+        // Wraps payload in {detail} to match the CustomEvent shape handlers receive.
         _fire(event, payload) {
             const arr = _fbListeners.get(event);
             if (!arr) return;
-            for (const fn of arr.slice()) fn(payload);
+            for (const fn of arr.slice()) fn({ detail: payload });
         },
         _listenerCount(event) {
             const arr = _fbListeners.get(event);
