@@ -212,6 +212,7 @@ import { createSummaryUi } from './summary-ui.js';
 import { createDrillConductor } from './drill-conductor.js';
 import { createSettingsPanel } from './settings-panel.js';
 import { createAvCalibrate } from './av-calibrate.js';
+import { createDiagnosticCatalog } from './diagnostic-catalog.js';
 try {
     if (typeof window !== 'undefined' && !window.feedBackDesktop && window.slopsmithDesktop) {
         window.feedBackDesktop = window.slopsmithDesktop;
@@ -2394,24 +2395,6 @@ function createNoteDetector(options = {}) {
     let seekResetSubscribed = false;
     let seekResetOnSeekFn = null;
 
-    // ── Miss-category diagnostic (#254 follow-up) ─────────────────────
-    // Counts WHY a judgment missed so a session report can isolate the
-    // dominant failure mode — pure misses → mic/audio chain; chord-partial
-    // → leniency too tight; timing → window too narrow; pitch → tolerance
-    // too narrow. Each miss falls into exactly one primary bin (chord
-    // events into chordPartial regardless of axis); per-string + signed-
-    // error arrays let us see which strings the player is losing on and
-    // whether they trend sharp/flat or early/late. Reset alongside
-    // hits/misses in resetScoring(); refs stay stable across reset.
-    const _diagBreakdown = {
-        pure: 0,           // miss, no pitch detected within the timing window
-        chordPartial: 0,   // chord event below the chord-leniency threshold
-        early: 0,
-        late: 0,
-        sharp: 0,
-        flat: 0,
-    };
-
     // Read-only verifier rejection log (last N chart-verify failures).
     const _ND_VERIFIER_REJECT_MAX = 20;
     const _ndVerifierRejects = [];
@@ -2427,26 +2410,6 @@ function createNoteDetector(options = {}) {
         RETIRE_NO_MATCH: 'retire no match',
         UNKNOWN: 'unknown',
     };
-    const _diagSingles = { hits: 0, misses: 0 };
-    const _diagChords  = { hits: 0, misses: 0 };
-    // Clean vs loose HITS — a low clean_rate next to high accuracy means
-    // sloppy-but-technically-hit (the honest-pass signal).
-    const _diagClean = { clean: 0, loose: 0 };
-    // Per-string. 8 covers 4/5/6/7/8-string arrangements without resizing.
-    const _diagPerString = Array.from({ length: 8 }, () => ({ hits: 0, misses: 0 }));
-    // Signed errors for matched judgments (excludes pure misses where no
-    // measurement exists). Capped to keep memory bounded across long
-    // sessions; percentiles in the summary run on the raw array.
-    const _DIAG_ERROR_CAP = 2000;
-    const _diagTimingErrors = [];   // milliseconds, sign = positive late / negative early — all matched judgments
-    // Hit-only timing samples. The all-matched array above includes
-    // judgments where the matcher snapped to a *neighbouring* chart note
-    // (closest-by-time wins, even if the user's actual playing skew is
-    // big), so its median is pinned by the matching window instead of
-    // tracking real audio↔chart drift. Restricting to actual hits gives
-    // a signal that responds linearly to A/V offset, which is what the
-    // auto-calibrate button keys off of.
-    const _diagTimingErrorsHits = [];
     // A/V auto-calibrate subsystem (K) — extracted to src/av-calibrate.js.
     // All mutable deps passed as accessor functions (LIVE-ACCESSOR RULE).
     const _avCal = createAvCalibrate({
@@ -2466,98 +2429,6 @@ function createNoteDetector(options = {}) {
         calibrateOffsetMs:      _ndCalibrateOffsetMs,
         dispatchInstanceEvent,
     });
-    const _diagPitchErrors  = [];   // cents,        sign = positive sharp / negative flat
-    // Per-judgment event capture for the downloadable JSON. Capped at a
-    // size that keeps the JSON small enough to share via copy-paste.
-    const _DIAG_EVENT_CAP = 2000;
-    const _diagEvents = [];
-
-    // Live-streaming state. When tuning mode is on, every judgment is
-    // also POSTed to /api/plugins/note_detect/live-judgment so an
-    // off-device reader (the host iterating against this code) can
-    // watch a session unfold in real time. The session id changes on
-    // every `song:play` so each take produces its own JSONL file; the
-    // value is used directly as a filename slug server-side, so it
-    // sticks to filesystem-safe characters. Off (null) until the first
-    // song:play fires with tuning mode on.
-    let _liveSessionId = null;
-    // Last minted session id, kept after song:ended (unlike
-    // _liveSessionId which _liveOnEnded clears) so the training-bundle
-    // upload can still locate the take's live_<id>.jsonl detect-stream.
-    let _liveLastSessionId = null;
-    function _buildSessionHeader() {
-        // Snapshot the user's live settings + song context at song:play
-        // time. Lands as the first JSONL line of the session file so
-        // any offline reader (host-side regression runner, future
-        // default-suggestion tooling, a maintainer looking at a shared
-        // session) knows what knobs produced the judgments below.
-        // Keep field names consistent with the `settings` block in the
-        // diagnostic export — same vocabulary across the two formats.
-        const info = (hw && hw.getSongInfo) ? hw.getSongInfo() : {};
-        const avOffsetMs = (hw && hw.getAvOffset) ? hw.getAvOffset() : 0;
-        return {
-            type: 'session_start',
-            schema: 'note_detect.live.session_start.v1',
-            ts: new Date().toISOString(),
-            plugin_version: _ND_VERSION,
-            song: {
-                title: info.title || null,
-                artist: info.artist || null,
-                arrangement: info.arrangement || null,
-                arrangement_index: (info.arrangement_index != null) ? info.arrangement_index : null,
-                tuning: info.tuning || null,
-                capo: info.capo != null ? info.capo : 0,
-                duration: info.duration != null ? info.duration : null,
-            },
-            settings: {
-                method: detectionMethod,
-                timing_tolerance_s: timingTolerance,
-                timing_hit_threshold_s: timingHitThreshold,
-                chord_timing_hit_threshold_s: chordTimingHitThreshold,
-                pitch_tolerance_cents: pitchTolerance,
-                pitch_hit_threshold_cents: pitchHitThreshold,
-                chord_hit_ratio: chordHitRatio,
-                detection_confidence_min: detectionConfidenceMin,
-                latency_offset_s: latencyOffset,
-                input_gain: inputGain,
-                channel: selectedChannel,
-                av_offset_ms: avOffsetMs,
-            },
-        };
-    }
-    function _streamLiveJudgment(eventObj) {
-        // Fire-and-forget — the network round-trip MUST NOT block the
-        // detection hot path. We don't await it here: any failure
-        // (server down, file capped, etc.) is silently swallowed so the
-        // in-memory diagnostic stays the source of truth and detection
-        // keeps running. The promise IS tracked in _livePending, though,
-        // so _flushLiveJudgments() can drain it before a training bundle
-        // is zipped server-side (otherwise the last judgments / the
-        // session header could miss the JSONL).
-        try {
-            const p = fetch(
-                '/api/plugins/note_detect/live-judgment?session='
-                    + encodeURIComponent(_liveSessionId),
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(eventObj),
-                    keepalive: true,   // survives page nav / song-end teardown
-                },
-            ).catch(() => {});
-            _livePending.add(p);
-            p.finally(() => _livePending.delete(p));
-        } catch (e) { /* swallow — see comment above */ }
-    }
-
-    // In-flight /live-judgment POSTs. Drained by _flushLiveJudgments()
-    // before a training bundle is requested.
-    const _livePending = new Set();
-    async function _flushLiveJudgments() {
-        // Snapshot: only the POSTs already issued belong to the take
-        // that just ended.
-        try { await Promise.allSettled([..._livePending]); } catch (_) {}
-    }
 
     // ── Reference-recording capture (#254 follow-up) ──────────────────
     // Captures the SAME Float32 audio frames the detector is running its
@@ -3097,10 +2968,6 @@ function createNoteDetector(options = {}) {
     // into the diagnostic export so a session can be tied to its detector.
     let bridgeMlActive = false;
     // Detector identity captured DURING detection (not read at diagnostic-
-    // export time, when usingDesktopBridge has already been reset by a Detect
-    // toggle — that mislabelled bridge sessions as web). Set each tick by
-    // whichever path actually ran.
-    let _diagDetector = null;
     // Onset-event state for the desktop ML bridge — used to gate CHORD timing.
     // Each detectNotes note carries a per-pitch `onsetSeq` counter; when it
     // increases, that pitch was struck anew. A chord commits a hit only on a
@@ -3141,7 +3008,9 @@ function createNoteDetector(options = {}) {
         noteResults,
         // summary-ui extras
         sectionStats, tuningMode, _recArmedForTraining,
-        _diagBreakdown, _diagTimingErrors, _diagPitchErrors,
+        _diagBreakdown: _diagCatalog.getDiagBreakdown(),
+        _diagTimingErrors: _diagCatalog.getDiagTimingErrors(),
+        _diagPitchErrors: _diagCatalog.getDiagPitchErrors(),
         // settings-panel extras (slider init + applySettings write surface)
         timingTolerance, pitchTolerance,
         timingHitThreshold, chordTimingHitThreshold, pitchHitThreshold,
@@ -3182,6 +3051,38 @@ function createNoteDetector(options = {}) {
         },
     });
 
+    // Diagnostic-catalog subsystem (nd-carve cut 6). Owns all diagnostic state,
+    // live-judgment streaming, miss-breakdown counters, downloadable-JSON payload,
+    // the diagnostic track catalog, and the post-play structured report.
+    // All mutable factory deps passed as accessor functions (LIVE-ACCESSOR RULE).
+    const _diagCatalog = createDiagnosticCatalog({
+        getHw:                      resolveHw,
+        getHits:                    () => hits,
+        getMisses:                  () => misses,
+        getBestStreak:              () => bestStreak,
+        getSectionStats:            () => sectionStats,
+        getRescueCalls:             () => _rescueCalls,
+        getRescueWindows:           () => _rescueWindows,
+        getRescueHits:              () => _rescueHits,
+        getRescueSkippedSilent:     () => _rescueSkippedSilent,
+        getNdUsingEngineVerifier:   () => _ndUsingEngineVerifier,
+        getNdDrainStats:            () => _ndDrainStats,
+        getDetectionMethod:         () => detectionMethod,
+        getTimingTolerance:         () => timingTolerance,
+        getTimingHitThreshold:      () => timingHitThreshold,
+        getChordTimingHitThreshold: () => chordTimingHitThreshold,
+        getPitchTolerance:          () => pitchTolerance,
+        getPitchHitThreshold:       () => pitchHitThreshold,
+        getChordHitRatio:           () => chordHitRatio,
+        getDetectionConfidenceMin:  () => detectionConfidenceMin,
+        getLatencyOffset:           () => latencyOffset,
+        getInputGain:               () => inputGain,
+        getSelectedChannel:         () => selectedChannel,
+        getTuningMode:              () => tuningMode,
+        getRecArmedForTraining:     () => _recArmedForTraining,
+        ndVersion:                  _ND_VERSION,
+    });
+
     // Summary UI subsystem (nd-carve-5 cut 2). Manages end-of-song overlay,
     // XP submission, deferred reveal, and end-of-song event subscription.
     const _summaryUi = createSummaryUi({
@@ -3206,12 +3107,12 @@ function createNoteDetector(options = {}) {
         ndWriteSongBest: _ndWriteSongBest,
         ndSaveCard: _ndSaveCard,
         ndShareCardClick: _ndShareCardClick,
-        ndReturnToPreviousSong: _ndReturnToPreviousSongAfterDiagnostic,
-        downloadDiagnostic: _downloadDiagnostic,
-        getDiagnosticTrack: _getDiagnosticTrackForSession,
-        buildDiagnosticPlayReport: _buildDiagnosticPlayReport,
-        renderDiagnosticPlayHtml: _renderDiagnosticPlayHtml,
-        diagPercentile: _diagPercentile,
+        ndReturnToPreviousSong: _diagCatalog.ndReturnToPreviousSong,
+        downloadDiagnostic: _diagCatalog.downloadDiagnostic,
+        getDiagnosticTrack: _diagCatalog.getDiagnosticTrackForSession,
+        buildDiagnosticPlayReport: _diagCatalog.buildDiagnosticPlayReport,
+        renderDiagnosticPlayHtml: _diagCatalog.renderDiagnosticPlayHtml,
+        diagPercentile: _diagCatalog.diagPercentile,
     });
     // Settings panel subsystem (nd-carve-5 cut 4). showSettings, drawSettingsVU,
     // VU state, populateDevices, onDeviceChange, onChannelChange, setMethod all
@@ -3237,7 +3138,7 @@ function createNoteDetector(options = {}) {
         renderDetectionHealth,
         openCalibrationWizard,
         openInstrumentCalibrationLab,
-        launchDiagnosticTrack:    _ndLaunchDiagnosticTrack,
+        launchDiagnosticTrack:    _diagCatalog.ndLaunchDiagnosticTrack,
         wireRangeScrollLock:      _ndWireSettingsRangeScrollLock,
     });
     // Draw hook — registered once per instance; removed in destroy().
@@ -3695,11 +3596,11 @@ function createNoteDetector(options = {}) {
                                     detectedMidi = -1;
                                     detectedConfidence = 0;
                                 }
-                                _diagDetector = {
+                                _diagCatalog.setDiagDetector({
                                     desktop_bridge: true,
                                     ml: bridgeMlActive,
                                     path: 'desktop-engine-verifier',
-                                };
+                                });
                                 // The engine-verifier path returns before
                                 // matchNotes(), so run the timing-free verify
                                 // target here too (else notedetect:verify never
@@ -3792,11 +3693,11 @@ function createNoteDetector(options = {}) {
                             // Stamp the detector identity from the path that
                             // actually ran this tick (read back by the
                             // diagnostic export).
-                            _diagDetector = {
+                            _diagCatalog.setDiagDetector({
                                 desktop_bridge: true,
                                 ml: bridgeMlActive,
                                 path: bridgeMlActive ? 'desktop-ml-basicpitch' : 'desktop-yin',
-                            };
+                            });
                             // The chord branch in matchNotes() dispatches the
                             // audio:scoreChord IPC — no raw audio buffer is
                             // threaded here, the engine reads its own input
@@ -4152,7 +4053,7 @@ function createNoteDetector(options = {}) {
             heap_mb: heapMb,
         };
         try { console.warn('[note_detect] input_dropout', JSON.stringify(rec)); } catch (_) {}
-        try { if (_liveSessionId) _streamLiveJudgment(rec); } catch (_) {}
+        try { if (_diagCatalog.getLiveSessionId()) _diagCatalog.streamLiveJudgment(rec); } catch (_) {}
     }
 
     function stopAudio() {
@@ -4574,9 +4475,9 @@ function createNoteDetector(options = {}) {
         // JS-DSP detector runs for both the browser path and the desktop
         // native-frame mode; only the audio SOURCE differs, so distinguish
         // them in the path tag (and flag desktop_bridge in native-frame mode).
-        _diagDetector = usingNativeFrames
+        _diagCatalog.setDiagDetector(usingNativeFrames
             ? { desktop_bridge: true, ml: false, path: 'desktop-native-' + (detectorUsed || activeMethod) }
-            : { desktop_bridge: false, ml: false, path: 'web-' + (detectorUsed || activeMethod) };
+            : { desktop_bridge: false, ml: false, path: 'web-' + (detectorUsed || activeMethod) });
 
         // Pass the current frame's buffer through to matchNotes so the
         // chord scorer can run on the same audio that was just analysed
@@ -5032,22 +4933,6 @@ function createNoteDetector(options = {}) {
         });
     }
 
-    // Update per-string diagnostic counters for a chord constituent
-    // judgment WITHOUT updating any other diagnostic counter. Chord
-    // constituent judgments are stashed straight into noteResults
-    // (bypassing recordJudgment) because totals/event-log are
-    // already accounted for at the chord-level entry — but the
-    // per-string panel still needs to see each string's outcome,
-    // otherwise it overrepresents whatever string happens to be
-    // `liveNotes[0]` and is blind to the rest.
-    function _recordPerStringForChord(judgment) {
-        const n = judgment.chartNote || judgment.note;
-        if (n && Number.isInteger(n.s) && n.s >= 0 && n.s < _diagPerString.length) {
-            const slot = _diagPerString[n.s];
-            if (judgment.hit) slot.hits++; else slot.misses++;
-        }
-    }
-
     // Bin one judgment into the diagnostic counters. Called from inside
     // recordJudgment under the same `count` gate so this never double-
     // counts (chord events fire one chord-level judgment plus per-string
@@ -5058,162 +4943,9 @@ function createNoteDetector(options = {}) {
     //
     // NOTE: per-string counters here only see the chord-level chartNote
     // (lead constituent). Chord constituents go through
-    // _recordPerStringForChord at their stash sites so per-string
-    // stats reflect each string's actual outcome.
-    function _recordDiagnostic(judgment) {
-        const isChord = !!judgment.chord;
-        if (judgment.hit) {
-            (isChord ? _diagChords : _diagSingles).hits++;
-            if (judgment.clean === false) _diagClean.loose++; else _diagClean.clean++;
-        } else {
-            (isChord ? _diagChords : _diagSingles).misses++;
-            if (isChord) {
-                _diagBreakdown.chordPartial++;
-            } else if (judgment.detectedMidi == null) {
-                _diagBreakdown.pure++;
-            } else if (judgment.timingState === 'EARLY') {
-                _diagBreakdown.early++;
-            } else if (judgment.timingState === 'LATE') {
-                _diagBreakdown.late++;
-            } else if (judgment.pitchState === 'SHARP') {
-                _diagBreakdown.sharp++;
-            } else if (judgment.pitchState === 'FLAT') {
-                _diagBreakdown.flat++;
-            } else {
-                // Defensive fallback — keep totals balanced if a future
-                // judgment shape doesn't trip any axis (shouldn't happen
-                // today). Land it in pure so the bin sums still match.
-                _diagBreakdown.pure++;
-            }
-        }
-        // Per-string counters: only update for non-chord judgments here.
-        // For chord-level judgments, judgment.chartNote is the chord's
-        // lead constituent (`liveNotes[0]`), which doesn't represent any
-        // single string's outcome — counting it here would overrepresent
-        // whichever string happened to be the lead and miss the other
-        // constituents. Per-string credit for chord constituents flows
-        // through _recordPerStringForChord at the constituent stash sites.
-        if (!isChord) {
-            const n = judgment.chartNote || judgment.note;
-            if (n && Number.isInteger(n.s) && n.s >= 0 && n.s < _diagPerString.length) {
-                const slot = _diagPerString[n.s];
-                if (judgment.hit) slot.hits++; else slot.misses++;
-            }
-        }
-        if (Number.isFinite(judgment.timingError) && _diagTimingErrors.length < _DIAG_ERROR_CAP) {
-            _diagTimingErrors.push(judgment.timingError);
-            if (judgment.hit && _diagTimingErrorsHits.length < _DIAG_ERROR_CAP) {
-                _diagTimingErrorsHits.push(judgment.timingError);
-            }
-        }
-        if (Number.isFinite(judgment.pitchError) && _diagPitchErrors.length < _DIAG_ERROR_CAP) {
-            _diagPitchErrors.push(judgment.pitchError);
-        }
-        // Build the event object once; push to in-memory log (capped)
-        // AND stream to the backend live-judgment endpoint when tuning
-        // mode is on. The streaming path is fire-and-forget — failures
-        // are swallowed since they shouldn't disrupt detection or
-        // bookkeeping.
-        const nn = judgment.chartNote || judgment.note || {};
-        const eventObj = {
-            t:   Number.isFinite(judgment.noteTime) ? +judgment.noteTime.toFixed(3) : null,
-            at:  Number.isFinite(judgment.time)     ? +judgment.time.toFixed(3)     : null,
-            s:   Number.isInteger(nn.s) ? nn.s : null,
-            f:   Number.isInteger(nn.f) ? nn.f : null,
-            sus: Number.isFinite(nn.sus) ? +(+nn.sus).toFixed(3) : 0,
-            hit:   !!judgment.hit,
-            clean: !!judgment.clean,
-            lr:  judgment.looseReason || undefined,   // 'timing' | 'pitch' | 'both' on a loose hit
-            chord: !!judgment.chord,
-            ts:  judgment.timingState || null,
-            ps:  judgment.pitchState  || null,
-            te:  Number.isFinite(judgment.timingError) ? judgment.timingError : null,
-            pe:  Number.isFinite(judgment.pitchError)  ? judgment.pitchError  : null,
-            ex:  Number.isFinite(judgment.expectedMidi) ? judgment.expectedMidi : null,
-            dx:  Number.isFinite(judgment.detectedMidi) ? judgment.detectedMidi : null,
-            cnf: Number.isFinite(judgment.confidence) ? +judgment.confidence.toFixed(3) : 0,
-            hs:  Number.isFinite(judgment.hitStrings)   ? judgment.hitStrings   : undefined,
-            tt:  Number.isFinite(judgment.totalStrings) ? judgment.totalStrings : undefined,
-            sc:  Number.isFinite(judgment.score) ? +judgment.score.toFixed(3) : undefined,
-            tf:  _diagTechFlags(nn),
-            // Conceded-miss attribution (coaching): mute-fail (open string rang
-            // instead of the fret), note-present + comb count (player played it,
-            // detector dropped it → tool miss vs flub), silent (stopped here).
-            mf:  judgment.muteFail ? true : undefined,
-            np:  judgment.notePresent ? true : undefined,
-            nc:  Number.isFinite(judgment.presenceComb) ? judgment.presenceComb : undefined,
-            sil: judgment.silent ? true : undefined,
-        };
-        if (_diagEvents.length < _DIAG_EVENT_CAP) {
-            _diagEvents.push(eventObj);
-        }
-        if ((tuningMode || _recArmedForTraining) && _liveSessionId) {
-            _streamLiveJudgment(eventObj);
-        }
-    }
-
-    function _diagTechFlags(n) {
-        if (!n) return null;
-        const flags = [];
-        if (n.bn)               flags.push('B');    // bend
-        if (n.sl != null && n.sl >= 0) flags.push('S');    // slide
-        if (n.hm || n.hp)       flags.push('H');    // harmonic / pinch
-        if (n.ho)               flags.push('h');    // hammer-on
-        if (n.po)               flags.push('p');    // pull-off
-        if (n.tp)               flags.push('t');    // tap
-        if (n.pm)               flags.push('PM');   // palm mute
-        if (n.mt)               flags.push('M');    // muted
-        if (n.tr)               flags.push('TR');   // tremolo
-        if (n.ac)               flags.push('A');    // accent
-        if ((+n.sus || 0) > 0)  flags.push('SUS');
-        return flags.length ? flags.join(',') : null;
-    }
-
-    function _diagPercentile(arr, p) {
-        if (!arr || !arr.length) return null;
-        const sorted = arr.slice().sort((a, b) => a - b);
-        return _diagPercentileFromSorted(sorted, p);
-    }
-    // Same nearest-rank math as _diagPercentile but takes an already-
-    // sorted array. Used by the bulk helper below to avoid sorting the
-    // same array three times when computing p10/median/p90 for one
-    // distribution.
-    function _diagPercentileFromSorted(sorted, p) {
-        if (!sorted || !sorted.length) return null;
-        const rank = (p / 100) * (sorted.length - 1);
-        const idx = Math.max(0, Math.min(sorted.length - 1, Math.round(rank)));
-        return sorted[idx];
-    }
-    // Sort once, compute count + p10/median/p90 once. _buildDiagnosticPayload
-    // calls this three times per export (timing, timing-hits, pitch); the
-    // previous code did three .slice().sort() per call there → 9 sorts per
-    // payload. The Settings-page A/V auto-calibrate panel polls every 1.5 s
-    // while open, so this hit was real.
-    function _diagDistribution(arr) {
-        if (!arr || !arr.length) return { count: 0, p10: null, median: null, p90: null };
-        const sorted = arr.slice().sort((a, b) => a - b);
-        return {
-            count: sorted.length,
-            p10:    _diagPercentileFromSorted(sorted, 10),
-            median: _diagPercentileFromSorted(sorted, 50),
-            p90:    _diagPercentileFromSorted(sorted, 90),
-        };
-    }
-
-    function _diagResetCounters() {
-        for (const k of Object.keys(_diagBreakdown)) _diagBreakdown[k] = 0;
-        _diagSingles.hits = 0; _diagSingles.misses = 0;
-        _diagChords.hits  = 0; _diagChords.misses  = 0;
-        _diagClean.clean = 0; _diagClean.loose = 0;
-        for (const slot of _diagPerString) { slot.hits = 0; slot.misses = 0; }
-        _diagTimingErrors.length = 0;
-        _diagTimingErrorsHits.length = 0;
-        _diagPitchErrors.length  = 0;
-        _diagEvents.length       = 0;
-        _ndDrainStats.dropUnknownId = 0;
-        _ndDrainStats.suppressedRedelivery = 0;
-        _ndDrainStats.maxBatch = 0;
-    }
+    // _diagCatalog.recordPerStringForChord at their stash sites so
+    // per-string stats reflect each string's actual outcome.
+    // (extracted to diagnostic-catalog.js cut 6)
 
     // Has this key already been COUNTED into hits/misses?
     //
@@ -5256,7 +4988,7 @@ function createNoteDetector(options = {}) {
             if (judgment && !judgment.hit) {
                 _ndLogVerifierRejectFromJudgmentIfNew(key, judgment);
             }
-            _recordDiagnostic(judgment);
+            _diagCatalog.recordDiagnostic(judgment);
             // No per-judgment sync — the host getLoop() poll would land
             // on the scoring hot path. Instead we sync at enable()
             // (closes the post-enable gap) and rely on updateHUD's
@@ -5975,7 +5707,7 @@ function createNoteDetector(options = {}) {
                         // diagnostics, where pitch correctness matters.
                         const stringMiss = makeMissJudgment(cn, cn.t, t, stringExpectedMidi);
                         noteResults.set(key, stringMiss);
-                        _recordPerStringForChord(stringMiss);
+                        _diagCatalog.recordPerStringForChord(stringMiss);
                         continue;
                     }
                     const stringRes = stringResByKey.get(`${cn.s}_${cn.f}`);
@@ -5994,7 +5726,7 @@ function createNoteDetector(options = {}) {
                         )
                         : makeMissJudgment(cn, cn.t, t, stringExpectedMidi);
                     noteResults.set(key, stringJudgment);
-                    _recordPerStringForChord(stringJudgment);
+                    _diagCatalog.recordPerStringForChord(stringJudgment);
                 }
             }
         }
@@ -6255,7 +5987,7 @@ function createNoteDetector(options = {}) {
                     // forcing miss-by-default fallbacks into the
                     // per-string panel and overstating misses on
                     // strings that may have rung fine.
-                    if (!voicingRescue) _recordPerStringForChord(stringMiss);
+                    if (!voicingRescue) _diagCatalog.recordPerStringForChord(stringMiss);
                 }
             }
         }
@@ -6290,7 +6022,8 @@ function createNoteDetector(options = {}) {
     // ── Verifier reject diagnostics (read-only) ───────────────────────
     function _ndVerifierPathLabel() {
         if (_ndUsingEngineVerifier) return 'desktop-engine-verifier';
-        if (_diagDetector && _diagDetector.path) return String(_diagDetector.path);
+        const _dd = _diagCatalog && _diagCatalog.getDiagDetector();
+        if (_dd && _dd.path) return String(_dd.path);
         if (usingDesktopBridge) return 'desktop-yin';
         return 'web-' + (detectionMethod || 'yin');
     }
@@ -6658,7 +6391,8 @@ function createNoteDetector(options = {}) {
 
     function _ndHealthDetectorPathLabel() {
         if (usingDesktopBridge) return 'Desktop audio engine';
-        if (_diagDetector && _diagDetector.path) return String(_diagDetector.path);
+        const _dd = _diagCatalog && _diagCatalog.getDiagDetector();
+        if (_dd && _dd.path) return String(_dd.path);
         return 'Browser microphone';
     }
 
@@ -6670,7 +6404,7 @@ function createNoteDetector(options = {}) {
         };
         let d;
         try {
-            d = _buildDiagnosticPayload();
+            d = _diagCatalog.buildDiagnosticPayload();
         } catch (e) {
             d = null;
         }
@@ -8248,7 +7982,7 @@ function createNoteDetector(options = {}) {
 
     function getCalibrationSnapshot() {
         let d = null;
-        try { d = _buildDiagnosticPayload(); } catch (_) { /* read-only */ }
+        try { d = _diagCatalog.buildDiagnosticPayload(); } catch (_) { /* read-only */ }
         const hw = resolveHw();
         let avMs = null;
         try { avMs = hw && hw.getAvOffset ? hw.getAvOffset() : null; } catch (_) {}
@@ -9848,7 +9582,8 @@ function createNoteDetector(options = {}) {
         const snap = getCalibrationSnapshot();
         let detectorPath = null;
         try {
-            if (_diagDetector && _diagDetector.path) detectorPath = _diagDetector.path;
+            const _dd = _diagCatalog && _diagCatalog.getDiagDetector();
+            if (_dd && _dd.path) detectorPath = _dd.path;
             else if (_ndUsingEngineVerifier) detectorPath = 'desktop-engine-verifier';
         } catch (_) { /* read-only */ }
         return {
@@ -10973,7 +10708,7 @@ function createNoteDetector(options = {}) {
         _ndVerifierRejects.length = 0;
         _ndRejectDedup.clear();
         _ndVerifyFailSnap.clear();
-        _diagResetCounters();
+        _diagCatalog.diagResetCounters(_ndDrainStats);
         sectionStats = [];
         currentSection = null;
         detectedMidi = -1;
@@ -10996,8 +10731,7 @@ function createNoteDetector(options = {}) {
     // the user can see on Settings (accuracy, breakdown, per-section)
     // stays intact.
     function _resetCalibrationSamples() {
-        _diagTimingErrors.length = 0;
-        _diagTimingErrorsHits.length = 0;
+        _diagCatalog.resetTimingErrors();
     }
 
     // ── Position-aware score recompute (got-feedback tester report) ────────
@@ -11817,7 +11551,7 @@ function createNoteDetector(options = {}) {
             // Per-string diagnostic uses the individual outcome rather than
             // the unit chord verdict. Built as a minimal shape — only `hit`
             // and `chartNote` are read by _recordPerStringForChord.
-            _recordPerStringForChord({ hit: constituentDetected, chartNote: mcn });
+            _diagCatalog.recordPerStringForChord({ hit: constituentDetected, chartNote: mcn });
         }
     }
 
@@ -12661,7 +12395,7 @@ function createNoteDetector(options = {}) {
         _recUnbindEvents();
         _unbindAutoRecord();
         _avCal.unbindEvents();
-        _liveUnbindEvents();
+        _diagCatalog.liveUnbindEvents();
         // Discard any unsaved recording state — destroying the instance
         // shouldn't write a half-captured WAV (or fire off an upload).
         _recArmed = false;
@@ -12699,127 +12433,6 @@ function createNoteDetector(options = {}) {
             await enable();
             detectPreference = true;
             saveSettings();
-        }
-    }
-
-    // Builds a self-contained snapshot of the current session — counters,
-    // miss-category breakdown, per-string hit rate, signed error
-    // percentiles, the song/arrangement/tuning, the detector settings,
-    // and a capped per-judgment event log. Schema is versioned so future
-    // tooling can dispatch. `benchmark_hint` carries the song's title/
-    // artist/arrangement triple verbatim so reports against the official
-    // benchmark sloppak can be filtered without needing a strict match.
-    function _buildDiagnosticPayload() {
-        const currentHw = resolveHw();
-        const info = (currentHw && currentHw.getSongInfo) ? currentHw.getSongInfo() : {};
-        const total = hits + misses;
-        const sumAcc = total > 0 ? +(hits / total).toFixed(3) : 0;
-        const sAcc = (_diagSingles.hits + _diagSingles.misses) > 0
-            ? +(_diagSingles.hits / (_diagSingles.hits + _diagSingles.misses)).toFixed(3) : 0;
-        const cAcc = (_diagChords.hits + _diagChords.misses) > 0
-            ? +(_diagChords.hits / (_diagChords.hits + _diagChords.misses)).toFixed(3) : 0;
-        return {
-            schema: 'note_detect.diagnostic.v1',
-            timestamp: new Date().toISOString(),
-            plugin_version: _ND_VERSION,
-            // Which detector actually produced this session — captured by the
-            // detection tick itself (see _diagDetector), so it stays correct
-            // even when the diagnostic is exported after Detect is toggled
-            // off. null only if detection never ran this session.
-            detector: _diagDetector || {
-                desktop_bridge: false, ml: false, path: 'none',
-            },
-            benchmark_hint: {
-                title: info.title || null,
-                artist: info.artist || null,
-                arrangement: info.arrangement || null,
-                arrangement_index: (info.arrangement_index != null) ? info.arrangement_index : null,
-            },
-            song: {
-                tuning: info.tuning || null,
-                capo: (info.capo != null) ? info.capo : 0,
-                duration: (info.duration != null) ? info.duration : null,
-                format: info.format || null,
-            },
-            settings: {
-                method: detectionMethod,
-                timing_tolerance_s: timingTolerance,
-                timing_hit_threshold_s: timingHitThreshold,
-                chord_timing_hit_threshold_s: chordTimingHitThreshold,
-                pitch_tolerance_cents: pitchTolerance,
-                pitch_hit_threshold_cents: pitchHitThreshold,
-                chord_hit_ratio: chordHitRatio,
-                detection_confidence_min: detectionConfidenceMin,
-                latency_offset_s: latencyOffset,
-                input_gain: inputGain,
-                channel: selectedChannel,
-            },
-            summary: {
-                hits, misses, total,
-                accuracy: sumAcc,
-                best_streak: bestStreak,
-                singles: { hits: _diagSingles.hits, misses: _diagSingles.misses, accuracy: sAcc },
-                chords:  { hits: _diagChords.hits,  misses: _diagChords.misses,  accuracy: cAcc },
-                rescue: { calls: _rescueCalls, windows: _rescueWindows, hits: _rescueHits, skipped_silent: _rescueSkippedSilent },
-                // Clean vs loose hit split — low clean_rate next to high
-                // accuracy = sloppy-but-technically-hit.
-                clean_hits: _diagClean.clean,
-                loose_hits: _diagClean.loose,
-                clean_rate: hits > 0 ? +(_diagClean.clean / hits).toFixed(3) : null,
-            },
-            // Engine-drain health. All zeros on the browser path (the drain
-            // never runs). See _ndDrainStats for how to read a non-zero.
-            engine_drain: {
-                active: _ndUsingEngineVerifier,
-                drop_unknown_id: _ndDrainStats.dropUnknownId,
-                suppressed_redelivery: _ndDrainStats.suppressedRedelivery,
-                max_batch: _ndDrainStats.maxBatch,
-            },
-            miss_breakdown: { ..._diagBreakdown },
-            per_string: _diagPerString.map((slot, s) => ({
-                s,
-                hits: slot.hits,
-                misses: slot.misses,
-                total: slot.hits + slot.misses,
-                accuracy: (slot.hits + slot.misses) > 0
-                    ? +(slot.hits / (slot.hits + slot.misses)).toFixed(3) : null,
-            })),
-            timing_error_ms: _diagDistribution(_diagTimingErrors),
-            // Hit-only timing distribution — the responsive signal for
-            // A/V auto-calibration. See _diagTimingErrorsHits comment.
-            timing_error_ms_hits: _diagDistribution(_diagTimingErrorsHits),
-            pitch_error_cents:    _diagDistribution(_diagPitchErrors),
-            sections: sectionStats.map(s => ({
-                name: s.name,
-                hits: s.hits,
-                misses: s.misses,
-                accuracy: (s.hits + s.misses) > 0
-                    ? +(s.hits / (s.hits + s.misses)).toFixed(3) : 0,
-            })),
-            events: _diagEvents,
-        };
-    }
-
-    function _downloadDiagnostic() {
-        try {
-            const payload = _buildDiagnosticPayload();
-            const json = JSON.stringify(payload, null, 2);
-            const blob = new Blob([json], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const slug = (payload.benchmark_hint.title || 'song')
-                .replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 40);
-            const ts = payload.timestamp.replace(/[:.]/g, '-').slice(0, 19);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `note_detect_diag_${slug}_${ts}.json`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            setTimeout(() => URL.revokeObjectURL(url), 500);
-            return true;
-        } catch (e) {
-            console.warn('[note_detect] diagnostic download failed:', e);
-            return false;
         }
     }
 
@@ -12979,9 +12592,9 @@ function createNoteDetector(options = {}) {
         // resolve to a session minted DURING this take — never a stale
         // one from a previous take. If this take mints no session at
         // all, the bundle simply ships without a JSONL (soft-skip).
-        _liveLastSessionId = null;
+        _diagCatalog.setLiveLastSessionId(null);
         _recBindEvents();
-        _liveBindEvents();
+        _diagCatalog.liveBindEvents();
         // If the user armed AFTER pressing Play, song:play has already
         // fired and won't fire again: _recSongPlaying never flipped true
         // (so the capture gate at processFrame / _startParallelTraining-
@@ -13006,7 +12619,7 @@ function createNoteDetector(options = {}) {
             // song:play and holds pre-arm judgments; reusing it would
             // misalign the detect-stream with a WAV that starts at arm
             // time. A fresh session begins here, aligned with the take.
-            _startLiveSession();
+            _diagCatalog.startLiveSession();
         }
         // When the desktop bridge is active, the JS-side processFrame()
         // never runs (native engine owns the device), so its
@@ -13026,7 +12639,7 @@ function createNoteDetector(options = {}) {
                 _recArmedForTraining = false;
                 _recLastSaveError = String(e && e.message || e);
                 _recUnbindEvents();
-                if (!tuningMode) _liveUnbindEvents();
+                if (!tuningMode) _diagCatalog.liveUnbindEvents();
                 console.warn('[note_detect] arm-for-training getUserMedia failed:', e);
                 throw e;
             }
@@ -13043,7 +12656,7 @@ function createNoteDetector(options = {}) {
         _recUnbindEvents();
         // Drop the live stream subscription too, unless tuningMode is
         // independently keeping it on. Mirrors the gate in setTuningMode.
-        if (!tuningMode) _liveUnbindEvents();
+        if (!tuningMode) _diagCatalog.liveUnbindEvents();
         // Release the mic. If the user disarmed mid-take the captured
         // buffer is retained for a manual Save.
         _stopParallelTrainingCapture();
@@ -13057,7 +12670,7 @@ function createNoteDetector(options = {}) {
         _recCappedAt = null;
         _recTrainingUploadResult = null;
         _recUnbindEvents();
-        if (!tuningMode) _liveUnbindEvents();
+        if (!tuningMode) _diagCatalog.liveUnbindEvents();
         _stopParallelTrainingCapture();
     }
     async function saveRecordingNow() {
@@ -13569,7 +13182,7 @@ function createNoteDetector(options = {}) {
                 // server zips whatever live_<id>.jsonl is on disk when
                 // /training-bundle runs, so unflushed judgments (or the
                 // session header) would be missing from the bundle.
-                await _flushLiveJudgments();
+                await _diagCatalog.flushLiveJudgments();
 
                 try {
                     const resp = await fetch('/api/plugins/note_detect/training-bundle', {
@@ -13702,7 +13315,7 @@ function createNoteDetector(options = {}) {
                 // clears it on this same song:ended. _liveLastSessionId
                 // survives song:ended, so it's the reliable handle for
                 // locating this take's live_<id>.jsonl detect-stream.
-                const sessionAtEnd = _liveSessionId || _liveLastSessionId;
+                const sessionAtEnd = _diagCatalog.getLiveSessionId() || _diagCatalog.getLiveLastSessionId();
                 const songInfoAtEnd = (hw && hw.getSongInfo) ? hw.getSongInfo() : {};
                 // Pin the custom song filename HERE too. _ndShared.currentFilename
                 // is a process-global the playSong wrapper overwrites, so
@@ -13748,7 +13361,7 @@ function createNoteDetector(options = {}) {
                     // finally would leave training mode stuck on.
                     _recArmed = false;
                     _recArmedForTraining = false;
-                    if (!tuningMode) _liveUnbindEvents();
+                    if (!tuningMode) _diagCatalog.liveUnbindEvents();
                     // Surface the score summary that _endOfSongOnEnded
                     // deferred — now that the consent modal (if any) has
                     // closed. No-op when nothing was deferred.
@@ -13767,7 +13380,7 @@ function createNoteDetector(options = {}) {
                 // armRecordingForTraining() force-bound — otherwise, with
                 // tuning mode off, later songs keep minting/posting live
                 // sessions for a take that no longer exists.
-                if (!tuningMode) _liveUnbindEvents();
+                if (!tuningMode) _diagCatalog.liveUnbindEvents();
                 _stopParallelTrainingCapture();
                 // No upload modal will open — release any deferred
                 // summary immediately.
@@ -13896,533 +13509,8 @@ function createNoteDetector(options = {}) {
     // Moved to src/av-calibrate.js (createAvCalibrate); _avCal constructed
     // near the old state-var declarations. Call sites below delegate to _avCal.
 
-    // Live-streaming event bindings — only active while tuning mode is
-    // on. Mints a fresh session id on song:play so every take produces
-    // its own `live_<id>.jsonl` file server-side; clears it on song:end
-    // so judgments fired after a song ends don't trickle into a stale
-    // file. Independent of recording arm state — the user gets live
-    // streaming even without arming a WAV capture.
-    let _liveOnPlay = null, _liveOnEnded = null;
-    let _liveSubscribed = false;
-
-    // Mint a fresh live session id and stream the session-header record
-    // as line 1 of the JSONL. Normally driven by song:play, but also
-    // called from armRecordingForTraining() when the user arms AFTER
-    // pressing Play — in that case song:play has already fired and won't
-    // fire again, so without this the take would carry no header.
-    function _startLiveSession() {
-        // Match the recording route's filename convention so live
-        // JSONL and recorded WAV pair up cleanly under
-        // static/note_detect_recordings/.
-        const now = new Date();
-        const pad = (n) => String(n).padStart(2, '0');
-        const ts = now.getFullYear()
-            + pad(now.getMonth() + 1) + pad(now.getDate()) + '_'
-            + pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds());
-        // Short random suffix avoids collisions when two panels
-        // emit a song:play in the same second (splitscreen).
-        const rand = Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
-        _liveSessionId = `${ts}_${rand}`;
-        // Mirror into a handle that is NOT cleared on song:ended, so the
-        // training-bundle upload can still locate this take's JSONL even
-        // though _liveOnEnded nulls _liveSessionId.
-        _liveLastSessionId = _liveSessionId;
-        // Stream a session-header record as line 1 of the JSONL so
-        // an offline reader knows under which settings the
-        // subsequent judgments were produced. Important for two
-        // reasons: (1) any analysis that infers "what cr was the
-        // user on?" from judgment data alone is fragile, (2) we
-        // want to mine these for sensible-default suggestions
-        // across users without each contributor having to attach
-        // their settings every time. Distinct shape (type:
-        // "session_start") so consumers can split header from
-        // judgments. Includes song / arrangement context too —
-        // useful for bucketing v1/v2/bass benchmark runs.
-        _streamLiveJudgment(_buildSessionHeader());
-    }
-
-    function _liveBindEvents() {
-        if (_liveSubscribed) return;
-        if (!window.slopsmith
-            || typeof window.slopsmith.on !== 'function'
-            || typeof window.slopsmith.off !== 'function') return;
-        _liveOnPlay = () => { _startLiveSession(); };
-        _liveOnEnded = () => {
-            _liveSessionId = null;
-        };
-        try {
-            window.slopsmith.on('song:play',  _liveOnPlay);
-            window.slopsmith.on('song:ended', _liveOnEnded);
-        } catch (e) {
-            try { window.slopsmith.off('song:play',  _liveOnPlay); }  catch (_) {}
-            try { window.slopsmith.off('song:ended', _liveOnEnded); } catch (_) {}
-            _liveOnPlay = _liveOnEnded = null;
-            return;
-        }
-        _liveSubscribed = true;
-    }
-    function _liveUnbindEvents() {
-        if (!_liveSubscribed) return;
-        if (window.slopsmith && typeof window.slopsmith.off === 'function') {
-            if (_liveOnPlay)  { try { window.slopsmith.off('song:play',  _liveOnPlay); }  catch (e) {} }
-            if (_liveOnEnded) { try { window.slopsmith.off('song:ended', _liveOnEnded); } catch (e) {} }
-        }
-        _liveOnPlay = _liveOnEnded = null;
-        _liveSubscribed = false;
-        _liveSessionId = null;
-    }
-
-    // ── Diagnostic track catalog — post-play report (read-only) ───────
-    // Catalog + report profiles let multiple diagnostic sloppaks share one
-    // detection/report path. Does NOT change scoring, thresholds, or settings.
-    const _DIAGNOSTIC_TRACK_CATALOG = [
-        {
-            id: 'basic-guitar-6',
-            title: 'Slopsmith Diagnostic — Basic Guitar',
-            artist: 'Slopsmith',
-            arrangement: 'Diagnostic Guitar',
-            filenameIncludes: 'slopsmith-diagnostic-basic-guitar.sloppak',
-            dlcRelativePath: 'diagnostics-builtin/slopsmith-diagnostic-basic-guitar.sloppak',
-            instrument: 'guitar',
-            stringCount: 6,
-            reportProfile: 'basic-guitar-v1',
-            description: 'Checks timing, open strings, fretted notes, and power chords.',
-        },
-    ];
-
-    function _ndSetDiagnosticLaunchStatus(panel, message) {
-        if (!panel) return;
-        const el = panel.querySelector('.nd-health-diag-launch-status');
-        if (el) el.textContent = message || '';
-    }
-
-    function _ndSetDiagnosticLaunchStatusAny(message) {
-        const el = document.querySelector('.nd-health-diag-launch-status');
-        if (el) el.textContent = message || '';
-    }
-
-    function _ndWaitForSongReadyEvent(timeoutMs) {
-        const ms = timeoutMs != null ? timeoutMs : 15000;
-        return new Promise((resolve) => {
-            if (!window.slopsmith || typeof window.slopsmith.on !== 'function') {
-                resolve(false);
-                return;
-            }
-            let settled = false;
-            const finish = (ok) => {
-                if (settled) return;
-                settled = true;
-                clearTimeout(timer);
-                try { window.slopsmith.off('song:ready', onReady); } catch (_) {}
-                resolve(ok);
-            };
-            const onReady = () => finish(true);
-            const timer = setTimeout(() => finish(false), ms);
-            try {
-                window.slopsmith.on('song:ready', onReady);
-            } catch (_) {
-                finish(false);
-            }
-        });
-    }
-
-    function _ndCaptureDiagnosticReturnBeforeLaunch(track) {
-        _ndClearDiagnosticReturnState();
-        const prevFn = String(_ndShared.currentFilename || '').trim();
-        if (!prevFn) return;
-        if (_getDiagnosticTrackForSession()) return;
-        const diagFn = String(track.dlcRelativePath || '').trim();
-        if (!diagFn) return;
-        const prevLower = prevFn.toLowerCase();
-        if (prevLower === diagFn.toLowerCase()) return;
-        if (track.filenameIncludes
-            && prevLower.includes(String(track.filenameIncludes).toLowerCase())) {
-            return;
-        }
-        const hw = resolveHw();
-        let info = {};
-        try {
-            info = (hw && hw.getSongInfo) ? (hw.getSongInfo() || {}) : {};
-        } catch (_) { /* read-only snapshot */ }
-        const arrIdx = info.arrangement_index;
-        _ndShared.diagnosticReturn.active = true;
-        _ndShared.diagnosticReturn.previousFilename = prevFn;
-        _ndShared.diagnosticReturn.previousArrangementIndex = Number.isFinite(arrIdx)
-            ? arrIdx
-            : null;
-        _ndShared.diagnosticReturn.previousTitle = info.title || null;
-        _ndShared.diagnosticReturn.previousArtist = info.artist || null;
-        _ndShared.diagnosticReturn.launchedTrackId = track.id;
-        _ndShared.diagnosticReturn.diagnosticFilename = diagFn;
-    }
-
-    async function _ndReturnToPreviousSongAfterDiagnostic() {
-        const r = _ndShared.diagnosticReturn;
-        if (!r || !r.active || !r.previousFilename) {
-            return false;
-        }
-        if (typeof window.playSong !== 'function') {
-            _ndSetDiagnosticLaunchStatusAny(
-                'Could not return to the previous song. Load it from your library.',
-            );
-            _ndClearDiagnosticReturnState();
-            return false;
-        }
-
-        const prevFn = r.previousFilename;
-        const arrIdx = r.previousArrangementIndex;
-        const readyPromise = _ndWaitForSongReadyEvent();
-
-        try {
-            const loadPromise = window.playSong(
-                encodeURIComponent(prevFn),
-                Number.isFinite(arrIdx) ? arrIdx : undefined,
-                { bridge: false },
-            );
-            if (loadPromise && typeof loadPromise.then === 'function') {
-                await loadPromise;
-            }
-        } catch (e) {
-            console.warn('[note_detect] return to previous song failed:', e);
-            _ndSetDiagnosticLaunchStatusAny(
-                'Could not return to the previous song. Load it from your library.',
-            );
-            _ndClearDiagnosticReturnState();
-            return false;
-        }
-
-        const ready = await readyPromise;
-        const prevTitle = r.previousTitle;
-        _ndClearDiagnosticReturnState();
-        if (ready) {
-            const label = prevTitle
-                ? `Returned to ${prevTitle}. Press Play when ready.`
-                : 'Returned to previous song. Press Play when ready.';
-            _ndSetDiagnosticLaunchStatusAny(label);
-            return true;
-        }
-
-        _ndSetDiagnosticLaunchStatusAny(
-            'Could not return to the previous song. Load it from your library.',
-        );
-        return false;
-    }
-
-    async function _ndLaunchDiagnosticTrack(trackId, panel) {
-        const track = _DIAGNOSTIC_TRACK_CATALOG.find((t) => t.id === trackId);
-        if (!track || !track.dlcRelativePath) {
-            _ndSetDiagnosticLaunchStatus(
-                panel,
-                'Diagnostic track is not configured.',
-            );
-            return;
-        }
-        if (typeof window.playSong !== 'function') {
-            _ndSetDiagnosticLaunchStatus(
-                panel,
-                'Diagnostic track could not be loaded. Restart Slopsmith or rescan your library.',
-            );
-            return;
-        }
-
-        _ndCaptureDiagnosticReturnBeforeLaunch(track);
-
-        _ndSetDiagnosticLaunchStatus(panel, 'Loading diagnostic track…');
-
-        const readyPromise = _ndWaitForSongReadyEvent();
-
-        try {
-            const loadPromise = window.playSong(
-                encodeURIComponent(track.dlcRelativePath),
-                undefined,
-                { bridge: false },
-            );
-            if (loadPromise && typeof loadPromise.then === 'function') {
-                await loadPromise;
-            }
-        } catch (e) {
-            console.warn('[note_detect] diagnostic launch failed:', e);
-            _ndSetDiagnosticLaunchStatus(
-                panel,
-                'Diagnostic track could not be loaded. Restart Slopsmith or rescan your library.',
-            );
-            return;
-        }
-
-        const ready = await readyPromise;
-        if (ready) {
-            _ndSetDiagnosticLaunchStatus(
-                panel,
-                'Loaded Basic Guitar Diagnostic. Press Play or Spacebar to begin.',
-            );
-            return;
-        }
-
-        _ndSetDiagnosticLaunchStatus(
-            panel,
-            'Diagnostic track is not available yet. Restart Slopsmith or rescan the library. If it still does not appear, the built-in diagnostic pack may not be installed.',
-        );
-    }
-
-    const _DIAGNOSTIC_REPORT_PROFILES = {
-        'basic-guitar-v1': {
-            matchTolS: 0.075,
-            powerChordCategoryId: 'powerChords',
-            expectedChordStrings: 2,
-            displayOrder: ['openLow', 'openNext', 'fretted', 'powerChords', 'repeatCheck'],
-            singleHitMissCategories: ['openLow', 'openNext', 'fretted'],
-            events: [
-                { t: 4,  category: 'openLow',      label: 'Open low string',  chord: false, s: 0, f: 0 },
-                { t: 8,  category: 'openNext',     label: 'Open next string', chord: false, s: 1, f: 0 },
-                { t: 12, category: 'fretted',      label: 'Fretted note',     chord: false, s: 0, f: 5 },
-                { t: 16, category: 'powerChords',  label: 'Power chord',      chord: true },
-                { t: 20, category: 'powerChords',  label: 'Power chord',      chord: true },
-                { t: 24, category: 'powerChords',  label: 'Power chord',      chord: true },
-                { t: 28, category: 'powerChords',  label: 'Power chord',      chord: true },
-                { t: 32, category: 'repeatCheck',  label: 'Repeat open low',  chord: false, s: 0, f: 0 },
-                { t: 36, category: 'repeatCheck',  label: 'Repeat fretted',   chord: false, s: 0, f: 5 },
-                { t: 40, category: 'repeatCheck',  label: 'Repeat power chord', chord: true },
-                { t: 44, category: 'repeatCheck',  label: 'Repeat power chord', chord: true },
-                { t: 48, category: 'repeatCheck',  label: 'Repeat power chord', chord: true },
-            ],
-            categories: {
-                openLow:     { label: 'Open low string' },
-                openNext:    { label: 'Open next string' },
-                fretted:     { label: 'Fretted note' },
-                powerChords: { label: 'Power chords' },
-                repeatCheck: { label: 'Repeat check' },
-            },
-        },
-    };
-
-    function _getDiagnosticTrackForSession() {
-        const fn = (_ndShared.currentFilename || '').toLowerCase();
-        const currentHw = resolveHw();
-        const info = (currentHw && currentHw.getSongInfo) ? currentHw.getSongInfo() : {};
-        for (const track of _DIAGNOSTIC_TRACK_CATALOG) {
-            if (track.filenameIncludes
-                && fn.includes(String(track.filenameIncludes).toLowerCase())) {
-                return track;
-            }
-        }
-        for (const track of _DIAGNOSTIC_TRACK_CATALOG) {
-            if (info.title === track.title
-                && info.artist === track.artist
-                && info.arrangement === track.arrangement) {
-                return track;
-            }
-        }
-        return null;
-    }
-
-    function _diagMatchProfileEvent(events, spec, matchTolS) {
-        for (const ev of events) {
-            if (!ev || !Number.isFinite(ev.t)) continue;
-            if (Math.abs(ev.t - spec.t) > matchTolS) continue;
-            if (!!ev.chord !== !!spec.chord) continue;
-            if (!spec.chord) {
-                if (ev.s !== spec.s || ev.f !== spec.f) continue;
-            }
-            return ev;
-        }
-        return null;
-    }
-
-    function _buildDiagnosticPlayReportFromProfile(profile, reportProfileId) {
-        const events = _diagEvents.slice();
-        const chartEvents = profile.events || [];
-        const matchTolS = profile.matchTolS != null ? profile.matchTolS : 0.075;
-        let matchedCount = 0;
-        for (const spec of chartEvents) {
-            if (_diagMatchProfileEvent(events, spec, matchTolS)) matchedCount++;
-        }
-        if (matchedCount === 0) return null;
-
-        const playTotal = hits + misses;
-        const overall = {
-            hits,
-            misses,
-            accuracy: playTotal > 0 ? Math.round((hits / playTotal) * 100) : 0,
-            bestStreak,
-        };
-
-        const categoryMeta = profile.categories || {};
-        const categories = {};
-        let hasPartialPowerChords = false;
-        const powerChordCategoryId = profile.powerChordCategoryId || 'powerChords';
-        const expectedChordStrings = profile.expectedChordStrings != null
-            ? profile.expectedChordStrings
-            : 2;
-
-        for (const catId of Object.keys(categoryMeta)) {
-            const specs = chartEvents.filter((s) => s.category === catId);
-            let attempts = 0;
-            let catHits = 0;
-            let catMisses = 0;
-            const timingErrors = [];
-            const chordAttempts = [];
-
-            for (const spec of specs) {
-                const ev = _diagMatchProfileEvent(events, spec, matchTolS);
-                if (!ev) continue;
-                attempts++;
-                if (ev.hit) catHits++; else catMisses++;
-                if (Number.isFinite(ev.te)) timingErrors.push(ev.te);
-                if (spec.chord) {
-                    const hs = Number.isFinite(ev.hs) ? ev.hs : null;
-                    const tt = Number.isFinite(ev.tt) ? ev.tt : expectedChordStrings;
-                    chordAttempts.push({ t: ev.t, hit: !!ev.hit, hs, tt });
-                    if (hs != null && hs < tt) hasPartialPowerChords = true;
-                }
-            }
-
-            if (attempts === 0) continue;
-
-            const cat = {
-                id: catId,
-                label: categoryMeta[catId].label,
-                attempts,
-                hits: catHits,
-                misses: catMisses,
-                accuracy: Math.round((catHits / attempts) * 100),
-                timingMedianMs: timingErrors.length
-                    ? _diagPercentile(timingErrors, 50)
-                    : null,
-            };
-
-            if (catId === powerChordCategoryId && chordAttempts.length) {
-                const heard = chordAttempts.filter((c) => c.hs != null);
-                const avgHeard = heard.length
-                    ? heard.reduce((sum, c) => sum + c.hs, 0) / heard.length
-                    : null;
-                cat.chordHits = catHits;
-                cat.chordMisses = catMisses;
-                cat.avgStringsHeard = avgHeard;
-                cat.expectedStrings = expectedChordStrings;
-                cat.perAttempt = chordAttempts.map((c) => {
-                    const heardTxt = c.hs != null
-                        ? `heard ${c.hs} of ${c.tt} strings`
-                        : 'strings heard unknown';
-                    return { t: c.t, hit: c.hit, heardTxt };
-                });
-            }
-
-            categories[catId] = cat;
-        }
-
-        if (!Object.keys(categories).length) return null;
-
-        return {
-            reportProfile: reportProfileId,
-            overall,
-            categories,
-            matchedCount,
-            hasPartialPowerChords,
-            sections: sectionStats.map((s) => ({
-                name: s.name,
-                hits: s.hits,
-                misses: s.misses,
-                accuracy: (s.hits + s.misses) > 0
-                    ? Math.round((s.hits / (s.hits + s.misses)) * 100)
-                    : 0,
-            })),
-        };
-    }
-
-    function _buildDiagnosticPlayReport(track) {
-        if (!track || !track.reportProfile) return null;
-        const profile = _DIAGNOSTIC_REPORT_PROFILES[track.reportProfile];
-        if (!profile) return null;
-        if (track.reportProfile === 'basic-guitar-v1') {
-            return _buildDiagnosticPlayReportFromProfile(profile, track.reportProfile);
-        }
-        return null;
-    }
-
-    function _diagPlayReportHitMissHtml(hit) {
-        return hit
-            ? '<span class="text-green-400">Hit</span>'
-            : '<span class="text-red-400">Miss</span>';
-    }
-
-    function _renderDiagnosticPlayHtml(report, reportProfileId) {
-        if (!report || !report.categories) return '';
-        if (reportProfileId === 'basic-guitar-v1') {
-            return _renderDiagnosticBasicGuitarPlayHtml(report);
-        }
-        return '';
-    }
-
-    function _renderDiagnosticBasicGuitarPlayHtml(report) {
-        const profile = _DIAGNOSTIC_REPORT_PROFILES['basic-guitar-v1'];
-        if (!report || !report.categories || !profile) return '';
-        const cats = report.categories;
-        let rows = '';
-
-        for (const id of (profile.singleHitMissCategories || [])) {
-            const c = cats[id];
-            if (!c || !c.attempts) continue;
-            rows += `<div class="flex justify-between gap-2 mb-1">`
-                + `<span class="text-gray-300">${c.label}</span>`
-                + _diagPlayReportHitMissHtml(c.hits > 0)
-                + `</div>`;
-        }
-
-        const pwr = cats[profile.powerChordCategoryId || 'powerChords'];
-        if (pwr && pwr.attempts) {
-            let pwrDetail = '';
-            if (pwr.avgStringsHeard != null) {
-                pwrDetail += `<div class="text-[10px] text-gray-500">`
-                    + `${pwr.chordHits}/${pwr.attempts} hit`
-                    + ` · avg heard ${pwr.avgStringsHeard.toFixed(1)} of ${pwr.expectedStrings} strings`
-                    + `</div>`;
-            } else {
-                pwrDetail += `<div class="text-[10px] text-gray-500">${pwr.hits}/${pwr.attempts} hit</div>`;
-            }
-            const partialLines = (pwr.perAttempt || [])
-                .filter((a) => a.heardTxt && (!a.hit || a.heardTxt.indexOf('heard 2 of 2') === -1))
-                .map((a) => {
-                    const prefix = Number.isFinite(a.t) ? `${a.t}s: ` : '';
-                    return `${prefix}${a.heardTxt}`;
-                });
-            if (partialLines.length) {
-                pwrDetail += `<div class="text-[10px] text-gray-500 mt-0.5">`
-                    + partialLines.join('<br>')
-                    + `</div>`;
-            }
-            rows += `<div class="mb-1">`
-                + `<div class="flex justify-between gap-2">`
-                + `<span class="text-gray-300">${pwr.label}</span>`
-                + `<span class="text-gray-400">${pwr.hits}/${pwr.attempts} hit</span>`
-                + `</div>${pwrDetail}</div>`;
-        }
-
-        const rep = cats.repeatCheck;
-        if (rep && rep.attempts) {
-            rows += `<div class="flex justify-between gap-2 mb-1">`
-                + `<span class="text-gray-300">${rep.label}</span>`
-                + `<span class="text-gray-400">${rep.hits}/${rep.attempts} hit</span>`
-                + `</div>`;
-        }
-
-        if (!rows) return '';
-
-        let notes = '<p class="text-[10px] text-gray-500 mt-2">'
-            + 'This diagnostic report did not change gameplay settings.'
-            + '</p>';
-        if (report.hasPartialPowerChords) {
-            notes += '<p class="text-[10px] text-gray-500 mt-1">'
-                + 'Power chords were partly heard. Try a cleaner/drier channel or run '
-                + 'Technique Assessment for root/fifth detail.'
-                + '</p>';
-        }
-
-        return `<div class="mt-3 text-xs border-t border-gray-600 pt-3">`
-            + `<div class="text-gray-200 text-xs font-semibold mb-2">Diagnostic Results</div>`
-            + rows
-            + notes
-            + `</div>`;
-    }
+    // Live-streaming, diagnostic catalog, and report functions moved to
+    // src/diagnostic-catalog.js (nd-carve-6 cut 6). Use _diagCatalog.*.
 
     // showSummary, _animateSummary, _runConfetti, publishToJournal moved to
     // createSummaryUi (nd-carve-5 cut 2). Use _summaryUi.showSummary.
@@ -14583,8 +13671,8 @@ function createNoteDetector(options = {}) {
         // all the counters mid-session (without touching audio /
         // enabled / button state) so you can navigate to a specific
         // section, reset, and capture *only* that section's events.
-        downloadDiagnostic: _downloadDiagnostic,
-        getDiagnostic: _buildDiagnosticPayload,
+        downloadDiagnostic: _diagCatalog.downloadDiagnostic,
+        getDiagnostic: _diagCatalog.buildDiagnosticPayload,
         resetDiagnostic: resetScoring,
         getCalibrationSnapshot,
         getVerifierRejects,
@@ -14711,7 +13799,7 @@ function createNoteDetector(options = {}) {
             // The drill-mode tests assert exactly one song:ended
             // listener after their own bind — adding an always-on
             // live-stream listener would break that contract.
-            if (tuningMode) _liveBindEvents(); else _liveUnbindEvents();
+            if (tuningMode) _diagCatalog.liveBindEvents(); else _diagCatalog.liveUnbindEvents();
             saveSettings();
         },
         // Auto-record-every-play opt-out. The song:loaded listener reads
@@ -15008,7 +14096,7 @@ function createNoteDetector(options = {}) {
     // mode: if the user already has tuning mode on from localStorage,
     // bind so song:play mints a session id without requiring a
     // setTuningMode toggle. setTuningMode handles the dynamic case.
-    if (tuningMode) _liveBindEvents();
+    if (tuningMode) _diagCatalog.liveBindEvents();
 
     // Auto-enable detection on construct when the persisted preference
     // says so. Default singletons only — splitscreen panels mount /
