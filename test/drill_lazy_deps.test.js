@@ -7,8 +7,9 @@
 //
 // Mutation proof (run before committing):
 //   In main.js change `getNoteResults: () => noteResults` to
-//   `getNoteResults: () => null` → test "getNoteResults() live accessor..."
-//   must fail with TypeError. Revert → full suite green.
+//   `getNoteResults: () => new Map()` → test "getNoteResults() live accessor..."
+//   must fail: rung stays 0, speed 0.8 (no hits seen → no advance).
+//   Revert → full suite green.
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -70,46 +71,48 @@ test('getNoteResults() live accessor: _drillConductorOnWrap reads the current ju
     // startDrill(). This test exercises that full path:
     //
     //   startDrill → registers drillConductorOnWrapFn = _drillConductorOnWrap
-    //   _recordJudgment × N → populates noteResults
+    //   _recordJudgment × 3 → populates noteResults (3 hits in [10,20] window)
     //   loop:restart fires → _drillConductorOnWrap calls getNoteResults()
-    //   assert: conductorActive conductor advances (no throw, no stale empty map)
+    //   score = 3/3 = 1.0 ≥ goal 0.85 → advance: rung 0→1, speed 0.8→0.9
     //
-    // Mutation that must break this test:
-    //   In main.js: change `getNoteResults: () => noteResults` to
-    //   `getNoteResults: () => null` → getNoteResults().values() throws TypeError.
-    const core = loadDetectionCore(withDrillSandbox());
+    // Discriminating assertion: rung must advance to 1 (speed 0.9). Under the
+    // mutation `getNoteResults: () => new Map()` the wrap sees 0 hits →
+    // score 0/3 → hold → rung stays 0, speed 0.8 → assertions fail.
+    //
+    // Requires charted notes in the judge window so _ndDrillPassScore returns a
+    // real score (not null). highway.getFilteredNotes is stubbed below.
+    const chartNotes = [
+        { t: 12, s: 1, f: 0 },
+        { t: 13, s: 1, f: 0 },
+        { t: 14, s: 1, f: 0 },
+    ];
+    const core = loadDetectionCore(withDrillSandbox((sandbox) => {
+        // Add getFilteredNotes so _drillChartedCount returns 3 (notes in [10,20]).
+        sandbox.highway.getFilteredNotes = () => chartNotes;
+    }));
     const det = core.createNoteDetector();
     det._bindDrillEvents();
 
     // startDrill registers drillConductorOnWrapFn for "loop:restart".
-    // It will reach getEnabled() (returns false → tries enable() which throws →
-    // caught silently), then register the conductor wrap listener.
     const started = await det.startDrill(10, 20);
-    // If setLoop is missing/fails, startDrill bails early — that would mean the
-    // slopsmith stub above didn't attach. Bail with a clear message.
-    if (!started) {
-        // startDrill may fail for other reasons (e.g. audio el); skip the
-        // conductor-wrap assertion but still assert no throw happened.
-        det.destroy();
-        return;
-    }
+    if (!started) { det.destroy(); return; }
 
     // Populate noteResults with 3 hits inside the judge window (10–20 s).
     for (let i = 0; i < 3; i++) {
         det._recordJudgment(`k${i}`, { hit: true, note: { s: 1, f: 0 }, noteTime: 12 + i, judgedAt: 0 });
     }
 
-    // Fire loop:restart → _drillOnLoopRestart (drill iteration bookkeeping)
-    // AND drillConductorOnWrapFn (_drillConductorOnWrap — calls getNoteResults()).
+    // Fire loop:restart → drillConductorOnWrapFn scores the window.
     assert.doesNotThrow(() => {
         core.slopsmith._fire('loop:restart', { time: 10 });
     }, 'loop:restart triggering _drillConductorOnWrap must not throw');
 
-    // The conductor scored the window. getNoteResults() returned a live Map
-    // (not null, not an empty stale snapshot), so the 3 hits were counted.
-    // drillConductorActive stays true (drill did not graduate on first pass).
+    // 3/3 hits → score 1.0 ≥ goal 0.85 → conductor advances rung 0→1.
+    // These concrete values fail under the () => new Map() mutation (rung=0, speed=0.8).
     const s = det.getConductorState();
     assert.ok(s.active, 'conductor must still be active after first scored pass');
+    assert.equal(s.rung, 1, 'rung must advance to 1 — proves getNoteResults() returned live Map');
+    assert.equal(s.speed, 0.9, 'speed at rung 1 is ladder[1] = 0.9');
 
     det.destroy();
 });
