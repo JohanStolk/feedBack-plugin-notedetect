@@ -3068,7 +3068,6 @@ function createNoteDetector(options = {}) {
         getDetectedMidi:            () => detectedMidi,
         getDetectedConfidence:      () => detectedConfidence,
         getDetectedString:          () => detectedString,
-        getDetectedFret:            () => detectedFret,
         getDetectedDisplayMidi:     () => detectedDisplayMidi,
         getDetectionConfidenceMin:  () => detectionConfidenceMin,
         getLatencyOffset:           () => latencyOffset,

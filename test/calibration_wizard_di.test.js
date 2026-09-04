@@ -10,7 +10,7 @@
 //
 // BINDING NOTE 2 — timer + listener hygiene test is test 1 below.
 //
-// 26 live accessors + 5 write-back callbacks total.
+// 25 live accessors + 5 write-back callbacks total.
 //
 //   TESTED HERE (14 live accessors via getCalibrationSnapshot()):
 //     getEnabled, getDiagCatalog, getInputLevel, getInputPeak,
@@ -21,9 +21,10 @@
 //   TESTED HERE (write-back callbacks via launchCalibration + internal paths):
 //     setCurrentArrangement  — launchCalibration({ instrument }) forces arrangement
 //
-//   HONEST GAPS (12 live accessors — require DOM interaction or full audio chain):
-//     getInputPeak          — snap.inputPeakPct reads it, but ALSO reads getInputLevel;
-//                             see test 7 which swaps both together.
+//   HONEST GAPS (11 live accessors — require DOM interaction or full audio chain):
+//     getInputGain          — read in _calWizardStartSignalCapture (signal-step
+//                             auto-capture) and _calWizardBuildSafeRecommendations;
+//                             requires DOM + signal-step flow.
 //     getAudioCtx           — read inside _calWizardWizardAudioApi() and the
 //                             step-1 render guard; reaching it needs the wizard open
 //                             at step 1 with DOM interaction.
@@ -41,7 +42,6 @@
 //     getCurrentStringCount — same path.
 //     getTuningOffsets      — same path.
 //     getEngineInputGain    — read in _calWizardStartSignalCapture; DOM + step-4 flow.
-//     getLevelSamples       — read in _calWizardRecommendInputGain; DOM + step-4 flow.
 //
 //   WRITE-BACK GAPS (4 callbacks — need DOM flow to exercise):
 //     setInputGain          — exercised in _calWizardApplySafeSettings at step 8 apply.
@@ -149,7 +149,6 @@ function makeAcc(overrides = {}) {
         getDetectedMidi:          () => -1,
         getDetectedConfidence:    () => 0,
         getDetectedString:        () => -1,
-        getDetectedFret:          () => -1,
         getDetectedDisplayMidi:   () => -1,
         getDetectionConfidenceMin:() => 0.7,
         getLatencyOffset:         () => 0,
@@ -206,61 +205,190 @@ function makeAcc(overrides = {}) {
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
-// 1. BINDING NOTE 2 — timer + listener hygiene after calibrationWizardClose()
-test('hygiene: setInterval tick cleared on close; song:play handler count balanced', () => {
-    const intervals = new Map();
-    let nextId = 1;
-    const songPlayHandlers = [];
-    const slop = {
-        on:  (ev, fn) => { if (ev === 'song:play') songPlayHandlers.push(fn); },
-        off: (ev, fn) => {
-            if (ev === 'song:play') {
-                const idx = songPlayHandlers.indexOf(fn);
-                if (idx !== -1) songPlayHandlers.splice(idx, 1);
-            }
+// ── Stable-selector DOM factory for hygiene tests ──────────────────────────────
+// Elements returned by querySelector(selector) are stable (same ref for same selector
+// on the same element), so onclick handlers set by renderCalibrationWizard() are
+// callable from the test. Used only in the hygiene tests.
+function makeStableEl() {
+    const kids = new Map();
+    const el = {
+        className: '', innerHTML: '', textContent: '', value: '',
+        style: {}, dataset: {}, isConnected: true,
+        onclick: null, onchange: null,
+        appendChild: () => {},
+        remove: () => {},
+        closest: () => null,
+        getAttribute: () => null,
+        classList: { add: () => {}, remove: () => {}, contains: () => false },
+        querySelectorAll: () => [],
+        querySelector(sel) {
+            if (!kids.has(sel)) kids.set(sel, makeStableEl());
+            return kids.get(sel);
         },
-        isPlaying: false,
     };
+    return el;
+}
+
+// 1. BINDING NOTE 2 — timer + listener hygiene after calibrationWizardClose().
+//    Three discriminating parts:
+//    A) _calWizardTick setInterval cleared on minimal open→close.
+//    B) song:play handler removed by close() when play-along was in 'waiting' phase.
+//       Red-proof: removing slopsmith.off from _calWizardTeardownPlayAlongWait leaves
+//       songPlayHandlers.length === 1 instead of 0 → assertion fails.
+//    C) _calWizardPauseRetryTimers cleared by close() after a full play-along cycle.
+//       Red-proof: removing _calWizardClearPauseRetries() from calibrationWizardClose()
+//       leaves timeouts map with pause-retry IDs → assertion fails.
+
+// Part A: tick interval cleared on minimal open→close.
+test('hygiene(A): setInterval tick cleared on close (minimal open flow)', () => {
+    const intervals = new Map();
+    let nextIId = 1;
 
     const { createCalibrationWizard } = loadModule({
-        setInterval:   (fn, ms) => { const id = nextId++; intervals.set(id, fn); return id; },
+        setInterval:   (fn, ms) => { const id = nextIId++; intervals.set(id, fn); return id; },
         clearInterval: (id)     => { intervals.delete(id); },
-        window: { slopsmith: slop, feedBack: { on: () => {}, off: () => {} }, tuner: null },
     });
 
     const wiz = createCalibrationWizard(makeAcc());
-
     wiz.openCalibrationWizard();
     assert.ok(intervals.size > 0,
         'openCalibrationWizard() must register at least one setInterval (tick)');
 
-    // song:play is only registered when the timing play-along starts (step 6 DOM click);
-    // in this minimal open flow it is not registered — this assertion checks the
-    // base-case balance and ensures close() does not leave orphan handlers.
-    const handlersBeforeClose = songPlayHandlers.length;
-
     wiz.calibrationWizardClose();
-
-    // All intervals must be cleared.
     assert.equal(intervals.size, 0,
         'calibrationWizardClose() must clear all setInterval handles');
+});
 
-    // Handler count after close must be 0 (none registered in this flow → none remaining;
-    // if play-along had registered one, _calWizardStopTimedPlayAlong would have removed it).
+// Part B: song:play handler removed by close() when play-along waiting.
+test('hygiene(B): close() removes song:play handler registered by timed play-along start', () => {
+    const intervals = new Map();
+    const timeouts = new Map();
+    let nextIId = 1, nextTId = 1;
+    const songPlayHandlers = [];
+    const slop = {
+        on:  (ev, fn) => { if (ev === 'song:play') songPlayHandlers.push(fn); },
+        off: (ev, fn) => {
+            if (ev !== 'song:play') return;
+            const idx = songPlayHandlers.indexOf(fn);
+            if (idx !== -1) songPlayHandlers.splice(idx, 1);
+        },
+        isPlaying: false,
+    };
+
+    // Track the overlay element created by document.createElement so we can
+    // navigate to step-6 button onclicks.
+    let overlay = null;
+
+    const { createCalibrationWizard } = loadModule({
+        setInterval:   (fn, ms) => { const id = nextIId++; intervals.set(id, fn); return id; },
+        clearInterval: (id)     => { intervals.delete(id); },
+        setTimeout:    (fn, ms) => { const id = nextTId++; timeouts.set(id, fn); return id; },
+        clearTimeout:  (id)     => { timeouts.delete(id); },
+        document: {
+            createElement: () => { overlay = makeStableEl(); return overlay; },
+            body: { appendChild: () => {}, querySelector: () => makeStableEl(), querySelectorAll: () => [] },
+        },
+        window: { slopsmith: slop, feedBack: { on: () => {}, off: () => {} }, tuner: null },
+    });
+
+    const wiz = createCalibrationWizard(makeAcc({ getEnabled: () => true }));
+    wiz.openCalibrationWizard();
+
+    // Advance to step 6 (timing step) — Next ×6, no guards in calibrationWizardNext().
+    for (let i = 0; i < 6; i++) wiz.calibrationWizardNext();
+
+    // Step-6 renderCalibrationWizard sets body.querySelector('[data-cal-start-playalong]').onclick.
+    const startBtn = overlay.querySelector('.nd-cal-body').querySelector('.nd-cal-start-playalong');
+    assert.ok(typeof startBtn.onclick === 'function',
+        'step-6 render must set .nd-cal-start-playalong.onclick');
+
+    // Invoke — _calWizardStartTimedPlayAlong: isPlaying=false → registers song:play handler.
+    slop.isPlaying = false;
+    startBtn.onclick();
+    assert.equal(songPlayHandlers.length, 1,
+        '_calWizardStartTimedPlayAlong must register exactly one song:play handler');
+
+    // Close WITHOUT emitting song:play — close() must unregister the waiting handler.
+    wiz.calibrationWizardClose();
     assert.equal(songPlayHandlers.length, 0,
-        'no song:play handlers must remain after close');
+        'calibrationWizardClose() must remove the song:play handler via _calWizardTeardownPlayAlongWait');
+    // Red proof: if slopsmith.off is removed from _calWizardTeardownPlayAlongWait,
+    // songPlayHandlers still has 1 entry → this assertion fails.
+});
 
-    // Baseline: if none were registered before close, still none after.
-    assert.equal(handlersBeforeClose, songPlayHandlers.length,
-        'handler count must be ≤ the pre-close count (close never adds handlers)');
+// Part C: _calWizardPauseRetryTimers cleared by close() after a full play-along duration cycle.
+test('hygiene(C): _calWizardClearPauseRetries clears pause-retry setTimeout IDs on close', () => {
+    const intervals = new Map();
+    const timeouts = new Map();
+    let nextIId = 1, nextTId = 1;
+    const songPlayHandlers = [];
+    const slop = {
+        on:  (ev, fn) => { if (ev === 'song:play') songPlayHandlers.push(fn); },
+        off: (ev, fn) => {
+            if (ev !== 'song:play') return;
+            const idx = songPlayHandlers.indexOf(fn);
+            if (idx !== -1) songPlayHandlers.splice(idx, 1);
+        },
+        isPlaying: false,
+    };
 
-    // Emitting song:play post-close must be a no-op (wizard state is null).
-    // Any remaining handler would fire into null state; there are none, so this is safe.
-    let postCloseFired = 0;
-    // (songPlayHandlers is now empty — forEach is a no-op, proving isolation)
-    songPlayHandlers.forEach(() => postCloseFired++);
-    assert.equal(postCloseFired, 0,
-        'song:play event post-close must have no registered wizard handlers');
+    let overlay = null;
+
+    const { createCalibrationWizard } = loadModule({
+        setInterval:   (fn, ms) => { const id = nextIId++; intervals.set(id, fn); return id; },
+        clearInterval: (id)     => { intervals.delete(id); },
+        setTimeout:    (fn, ms) => { const id = nextTId++; timeouts.set(id, fn); return id; },
+        clearTimeout:  (id)     => { timeouts.delete(id); },
+        document: {
+            createElement: () => { overlay = makeStableEl(); return overlay; },
+            body: { appendChild: () => {}, querySelector: () => makeStableEl(), querySelectorAll: () => [] },
+        },
+        window: { slopsmith: slop, feedBack: { on: () => {}, off: () => {} }, tuner: null },
+    });
+
+    const wiz = createCalibrationWizard(makeAcc({ getEnabled: () => true }));
+    wiz.openCalibrationWizard();
+    for (let i = 0; i < 6; i++) wiz.calibrationWizardNext();
+
+    // Start play-along: isPlaying=false → wasPlayingAtArm=false, registers song:play.
+    slop.isPlaying = false;
+    overlay.querySelector('.nd-cal-body').querySelector('.nd-cal-start-playalong').onclick();
+    assert.equal(songPlayHandlers.length, 1, 'play-along waiting: song:play registered');
+
+    // Emit song:play → onPlayHandler → playbackSeen=true → _calWizardPollPlayAlongWait
+    // → _calWizardBeginTimedPlayAlongCountdown (phase→running, unregisters song:play,
+    //   sets pa.timerId + pa.intervalId via deferred setTimeout/setInterval).
+    slop.isPlaying = true;
+    songPlayHandlers[0](); // fire the waiting handler
+
+    assert.equal(songPlayHandlers.length, 0,
+        '_calWizardBeginTimedPlayAlongCountdown must unregister song:play handler');
+
+    // pa.timerId is now in timeouts (deferred, not yet fired). It is the largest key
+    // because waitTimeoutId was already cleared by _calWizardTeardownPlayAlongWait.
+    assert.ok(timeouts.size > 0, 'play-along countdown must have pending timeouts');
+    const durationTimerId = Math.max(...timeouts.keys());
+
+    // Fire the duration timer → _calWizardFinishTimedPlayAlong(false)
+    // → _calWizardMaybePauseAfterTimedPlayAlong({ wasPlayingAtArm: false })
+    // → isPlaying=true → pushes setTimeout IDs to _calWizardPauseRetryTimers.
+    const durationCb = timeouts.get(durationTimerId);
+    timeouts.delete(durationTimerId); // simulate clearTimeout call from _calWizardStopTimedPlayAlong
+    durationCb();
+
+    // _CAL_WIZARD_PAUSE_RETRY_DELAYS_MS has 6 entries → 6 new deferred timeouts.
+    const retryIds = new Set(timeouts.keys());
+    assert.ok(retryIds.size >= 1,
+        '_calWizardMaybePauseAfterTimedPlayAlong must have registered at least one pause-retry timer');
+
+    // close() → _calWizardClearPauseRetries() → clearTimeout for each retry ID → removes from map.
+    wiz.calibrationWizardClose();
+    for (const id of retryIds) {
+        assert.ok(!timeouts.has(id),
+            `pause-retry timer ${id} must be cleared by calibrationWizardClose() via _calWizardClearPauseRetries`);
+    }
+    // Red proof: if _calWizardClearPauseRetries() is removed from calibrationWizardClose(),
+    // timeouts still contains all retryIds → the assertions above fail.
 });
 
 // 2. getEnabled() — live in getCalibrationSnapshot() → snap.enabled

@@ -17,7 +17,7 @@ const CAL_TARGET_PEAK = 0.25; // -12 dBFS — ponytail: duplicated from main.js,
 export function createCalibrationWizard({
     // ── Live accessors (read at call time — LIVE-ACCESSOR RULE) ──────────────
     getInputLevel, getInputPeak,
-    getDetectedMidi, getDetectedConfidence, getDetectedString, getDetectedFret,
+    getDetectedMidi, getDetectedConfidence, getDetectedString,
     getDetectedDisplayMidi, getDetectionConfidenceMin,
     getLatencyOffset, getInputGain, getEngineInputGain,
     getEnabled, getUsingDesktopBridge,
