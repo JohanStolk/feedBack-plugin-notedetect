@@ -3080,6 +3080,9 @@ function createNoteDetector(options = {}) {
         getSelectedChannel:         () => selectedChannel,
         getTuningMode:              () => tuningMode,
         getRecArmedForTraining:     () => _recArmedForTraining,
+        getCurrentFilename:         () => _ndShared.currentFilename,
+        getDiagnosticReturn:        () => _ndShared.diagnosticReturn,
+        clearDiagnosticReturnState: () => _ndClearDiagnosticReturnState(),
         ndVersion:                  _ND_VERSION,
     });
 

@@ -11,7 +11,7 @@
 // and ndReturnToPreviousSong via its own DI — those are wired into
 // createSummaryUi(...) in main.js pointing at diagCatalog.xxx.
 
-/* global _ndShared, _ndClearDiagnosticReturnState, window */
+/* global window */
 
 export function createDiagnosticCatalog({
     // ── Mutable factory deps (LIVE-ACCESSOR RULE) ────────────────────
@@ -39,6 +39,10 @@ export function createDiagnosticCatalog({
     getSelectedChannel,         // () => selectedChannel
     getTuningMode,              // () => tuningMode
     getRecArmedForTraining,     // () => _recArmedForTraining
+    // ── _ndShared readers (LIVE-ACCESSOR RULE) ────────────────────────
+    getCurrentFilename,         // () => _ndShared.currentFilename
+    getDiagnosticReturn,        // () => _ndShared.diagnosticReturn
+    clearDiagnosticReturnState, // () => _ndClearDiagnosticReturnState()
     // ── Constants (value, not accessor — never mutated) ───────────────
     ndVersion,                  // _ND_VERSION string
 }) {
@@ -527,7 +531,7 @@ export function createDiagnosticCatalog({
     // ── Diagnostic-track launch / return ─────────────────────────────
 
     function getDiagnosticTrackForSession() {
-        const fn = (_ndShared.currentFilename || '').toLowerCase();
+        const fn = (getCurrentFilename() || '').toLowerCase();
         const currentHw = getHw();
         const info = (currentHw && currentHw.getSongInfo) ? currentHw.getSongInfo() : {};
         for (const track of _DIAGNOSTIC_TRACK_CATALOG) {
@@ -547,8 +551,8 @@ export function createDiagnosticCatalog({
     }
 
     function ndCaptureDiagnosticReturnBeforeLaunch(track) {
-        _ndClearDiagnosticReturnState();
-        const prevFn = String(_ndShared.currentFilename || '').trim();
+        clearDiagnosticReturnState();
+        const prevFn = String(getCurrentFilename() || '').trim();
         if (!prevFn) return;
         if (getDiagnosticTrackForSession()) return;
         const diagFn = String(track.dlcRelativePath || '').trim();
@@ -565,24 +569,24 @@ export function createDiagnosticCatalog({
             info = (currentHw && currentHw.getSongInfo) ? (currentHw.getSongInfo() || {}) : {};
         } catch (_) { /* read-only snapshot */ }
         const arrIdx = info.arrangement_index;
-        _ndShared.diagnosticReturn.active = true;
-        _ndShared.diagnosticReturn.previousFilename = prevFn;
-        _ndShared.diagnosticReturn.previousArrangementIndex = Number.isFinite(arrIdx)
-            ? arrIdx : null;
-        _ndShared.diagnosticReturn.previousTitle  = info.title  || null;
-        _ndShared.diagnosticReturn.previousArtist = info.artist || null;
-        _ndShared.diagnosticReturn.launchedTrackId = track.id;
-        _ndShared.diagnosticReturn.diagnosticFilename = diagFn;
+        const dr = getDiagnosticReturn();
+        dr.active = true;
+        dr.previousFilename = prevFn;
+        dr.previousArrangementIndex = Number.isFinite(arrIdx) ? arrIdx : null;
+        dr.previousTitle  = info.title  || null;
+        dr.previousArtist = info.artist || null;
+        dr.launchedTrackId = track.id;
+        dr.diagnosticFilename = diagFn;
     }
 
     async function ndReturnToPreviousSong() {
-        const r = _ndShared.diagnosticReturn;
+        const r = getDiagnosticReturn();
         if (!r || !r.active || !r.previousFilename) return false;
         if (typeof window.playSong !== 'function') {
             _ndSetDiagnosticLaunchStatusAny(
                 'Could not return to the previous song. Load it from your library.',
             );
-            _ndClearDiagnosticReturnState();
+            clearDiagnosticReturnState();
             return false;
         }
         const prevFn  = r.previousFilename;
@@ -600,12 +604,12 @@ export function createDiagnosticCatalog({
             _ndSetDiagnosticLaunchStatusAny(
                 'Could not return to the previous song. Load it from your library.',
             );
-            _ndClearDiagnosticReturnState();
+            clearDiagnosticReturnState();
             return false;
         }
         const ready    = await readyPromise;
         const prevTitle = r.previousTitle;
-        _ndClearDiagnosticReturnState();
+        clearDiagnosticReturnState();
         if (ready) {
             const label = prevTitle
                 ? `Returned to ${prevTitle}. Press Play when ready.`
