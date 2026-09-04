@@ -10,7 +10,7 @@
 //
 // BINDING NOTE 2 — timer + listener hygiene test is test 1 below.
 //
-// 25 live accessors + 5 write-back callbacks total.
+// 24 live accessors + 5 write-back callbacks total.
 //
 //   TESTED HERE (14 live accessors via getCalibrationSnapshot()):
 //     getEnabled, getDiagCatalog, getInputLevel, getInputPeak,
@@ -21,7 +21,7 @@
 //   TESTED HERE (write-back callbacks via launchCalibration + internal paths):
 //     setCurrentArrangement  — launchCalibration({ instrument }) forces arrangement
 //
-//   HONEST GAPS (11 live accessors — require DOM interaction or full audio chain):
+//   HONEST GAPS (10 live accessors — require DOM interaction or full audio chain):
 //     getInputGain          — read in _calWizardStartSignalCapture (signal-step
 //                             auto-capture) and _calWizardBuildSafeRecommendations;
 //                             requires DOM + signal-step flow.
