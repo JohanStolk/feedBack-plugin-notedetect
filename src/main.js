@@ -3321,6 +3321,7 @@ function createNoteDetector(options = {}) {
         getNdOtherOwnsOurSlot:     () => _ndOtherOwnsOurSlot(),
         getNdVerifierChartSig:     () => _ndVerifierChartSig,
         getNdVerifyTarget:         () => _verifyTarget,
+        getInputLost:              () => _inputLost,
         // ── Write-back callbacks ───────────────────────────────────────────
         setUsingDesktopBridge:     (v) => { usingDesktopBridge = v; },
         setBridgeDesktop:          (v) => { bridgeDesktop = v; },

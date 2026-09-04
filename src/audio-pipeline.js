@@ -41,6 +41,7 @@ export function createAudioPipeline({
     getNdOtherOwnsOurSlot,
     getNdVerifierChartSig,
     getNdVerifyTarget,      // () => _verifyTarget (may be null)
+    getInputLost,           // () => _inputLost — idempotency guard in markLost
 
     // ── Write-back callbacks ─────────────────────────────────────────────
     setUsingDesktopBridge,
@@ -172,12 +173,12 @@ export function createAudioPipeline({
         _unbindStreamHealth();
         setHealthTrack(track);
         const markLost = (why) => {
-            if (!getEnabled()) return;
+            if (getInputLost() || !getEnabled()) return;
             setInputLost(true);
             console.warn(`[note_detect] input ${why} — the audio interface dropped the input stream`);
             try { updateButton(); } catch (_) {}
             setTimeout(() => {
-                if (!getEnabled()) return;
+                if (!getEnabled() || !getInputLost()) return;
                 const now = (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0;
                 if (now - _lastInputRecover < 4000) return;
                 _lastInputRecover = now;
@@ -187,7 +188,11 @@ export function createAudioPipeline({
         };
         const onEnded  = () => markLost('ended');
         const onMute   = () => markLost('muted');
-        const onUnmute = () => { setInputLost(false); try { updateButton(); } catch (_) {} };
+        const onUnmute = () => {
+            if (!getInputLost()) return;
+            setInputLost(false);
+            try { updateButton(); } catch (_) {}
+        };
         try {
             track.addEventListener('ended', onEnded);
             track.addEventListener('mute', onMute);
@@ -440,8 +445,9 @@ export function createAudioPipeline({
                         if (!_localOwnsSource) {
                             console.warn('[note_detect] desktop addon lacks the source-indexed '
                                 + 'scoring API; ignoring opts.sourceId and using the default input');
+                        } else if (!ndTryFreeSource(getSourceId())) {
+                            ndOrphanSourceIds.push(getSourceId());
                         }
-                        if (!ndTryFreeSource(getSourceId())) ndOrphanSourceIds.push(getSourceId());
                         setSourceId(null);
                         _localOwnsSource = false;
                         setNdOwnsSource(false);

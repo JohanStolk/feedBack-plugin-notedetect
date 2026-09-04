@@ -88,6 +88,7 @@ function makeDI(overrides = {}) {
         getNdOtherOwnsOurSlot:     () => false,
         getNdVerifierChartSig:     () => '',
         getNdVerifyTarget:         () => null,
+        getInputLost:              () => false,
         // ── write-back callbacks ────────────────────────────────────────────
         setUsingDesktopBridge:     (v) => writes.usingDesktopBridge.push(v),
         setBridgeDesktop:          (v) => writes.bridgeDesktop.push(v),
