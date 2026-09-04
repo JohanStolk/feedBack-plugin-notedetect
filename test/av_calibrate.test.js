@@ -132,3 +132,20 @@ test('lifecycle: non-default instance never binds calibrate listeners', () => {
     assert.equal(core.slopsmith._listenerCount('song:ended'), 0, 'splitscreen panel does not calibrate');
     det.destroy();
 });
+
+// ── LIVE-ACCESSOR RULE regression (cut 5) ────────────────────────────────────
+// Prove getHw is resolved at call time, not captured at createAvCalibrate()
+// construction. If the module captured hw.getNotes directly, mutating
+// core.highway after construction would be invisible and this test would fail.
+test('getHw accessor is resolved live after construction (lazy-dep regression)', () => {
+    const core = loadDetectionCore();
+    const det = core.createNoteDetector({ isDefault: true });
+    // Initial stub returns []
+    assert.equal(det._calDebug().notes, 0, 'notes = 0 from initial stub');
+    // Mutate the highway stub after construction — live accessor must see it
+    const original = core.highway.getNotes;
+    core.highway.getNotes = () => [1, 2, 3];
+    assert.equal(det._calDebug().notes, 3, 'getHw is live: sees updated getNotes post-construction');
+    core.highway.getNotes = original;  // restore for sibling tests
+    det.destroy();
+});
