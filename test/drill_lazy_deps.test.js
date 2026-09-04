@@ -50,6 +50,9 @@ test('getEnabled() lazy accessor: startDrill reaches the getEnabled() guard with
     const det = core.createNoteDetector();
     det._bindDrillEvents();
 
+    // Note: captured-false and live-false are indistinguishable in the vm
+    // (enable() always fails); this test proves the path is reached, not
+    // that the value is live.
     // startDrill: no throw expected even with no audio pipeline — the
     // enable() failure is caught inside startDrill.
     await assert.doesNotReject(
