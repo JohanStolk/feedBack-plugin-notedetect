@@ -13,12 +13,15 @@
 //     getInputGain           — report.settings.input_gain
 //     getDetectionMethod     — report.settings.method
 //     getCurrentStringCount  — report.per_string length
+//     getPitchTolerance      — report.settings.pitch_tolerance_cents
+//     getTimingTolerance     — report.settings.timing_tolerance_s
 //     (null-at-ctor variants for getLatencyOffset and getCurrentStringCount)
 //
 //   HONEST GAPS (need DOM + full audio pipeline):
-//     getCapo / getCurrentArrangement / getTuningOffsets — only read in
-//       _calLabRunScoreProbe(), which fires from DOM button clicks during
-//       an active probe step; cannot reach without a real probe flow.
+//     getChordHitRatio — only read in _calLabRunScoreProbe() as minHitRatio,
+//       which fires from DOM button clicks during an active probe step.
+//     getCapo / getCurrentArrangement / getTuningOffsets — same probe path;
+//       cannot reach without a real probe flow.
 //     getSelectedChannel — read in _calLabRefreshLive's live-step state;
 //       needs live DOM step.
 //     getEnabled + getUsingDesktopBridge — gate in _calLabCanProbe(), only
@@ -415,4 +418,68 @@ test('report.schema is the expected constant', () => {
     assert.ok(report);
     assert.ok(typeof report.schema === 'string' && report.schema.startsWith('note_detect.'),
         `unexpected schema: ${report.schema}`);
+});
+
+// Test 12: getPitchTolerance is read live from getCalibrationReport()
+test('getPitchTolerance: live swap — report reflects swapped value', () => {
+    let pitchTol = 50;
+    const ctx = loadModule();
+    ctx.document = {
+        createElement: () => makeStub(),
+        body: { appendChild: () => {}, querySelector: () => null, querySelectorAll: () => [] },
+    };
+    const inst = ctx.createTechniqueAssessment({
+        getUsingDesktopBridge: () => false, getDetectionMethod: () => 'hps',
+        getSelectedChannel: () => 0, getInputGain: () => 1, getCurrentArrangement: () => 0,
+        getCurrentStringCount: () => 6, getTuningOffsets: () => [],
+        getLatencyOffset: () => 0, getEnabled: () => false,
+        getNdUsingEngineVerifier: () => false, getCapo: () => 0,
+        getPitchTolerance: () => pitchTol,
+        getTimingTolerance: () => 0.15, getChordHitRatio: () => 0.4,
+        diagCatalog: { getDiagDetector: () => null }, ndBridgeScoreAvailable: () => false,
+        ndBridgeScoreChord: async () => null, ndMidiFromStringFret: () => 40,
+        ndMidiToName: (m) => String(m), calibrationFormatLevel: () => '0%',
+        getCalibrationSnapshot: () => ({
+            sampleRateHz: 48000, channel: 0, source: 'default', avOffsetMs: 0,
+        }),
+    });
+    inst.openInstrumentCalibrationLab();
+    // Swap after construction — if captured, still sees 50
+    pitchTol = 75;
+    const report = inst.getCalibrationReport();
+    assert.ok(report);
+    assert.equal(report.settings.pitch_tolerance_cents, 75,
+        'getPitchTolerance swap not reflected — value was captured at construction');
+});
+
+// Test 13: getTimingTolerance is read live from getCalibrationReport()
+test('getTimingTolerance: live swap — report reflects swapped value', () => {
+    let timingTol = 0.150;
+    const ctx = loadModule();
+    ctx.document = {
+        createElement: () => makeStub(),
+        body: { appendChild: () => {}, querySelector: () => null, querySelectorAll: () => [] },
+    };
+    const inst = ctx.createTechniqueAssessment({
+        getUsingDesktopBridge: () => false, getDetectionMethod: () => 'hps',
+        getSelectedChannel: () => 0, getInputGain: () => 1, getCurrentArrangement: () => 0,
+        getCurrentStringCount: () => 6, getTuningOffsets: () => [],
+        getLatencyOffset: () => 0, getEnabled: () => false,
+        getNdUsingEngineVerifier: () => false, getCapo: () => 0,
+        getPitchTolerance: () => 50, getTimingTolerance: () => timingTol,
+        getChordHitRatio: () => 0.4,
+        diagCatalog: { getDiagDetector: () => null }, ndBridgeScoreAvailable: () => false,
+        ndBridgeScoreChord: async () => null, ndMidiFromStringFret: () => 40,
+        ndMidiToName: (m) => String(m), calibrationFormatLevel: () => '0%',
+        getCalibrationSnapshot: () => ({
+            sampleRateHz: 48000, channel: 0, source: 'default', avOffsetMs: 0,
+        }),
+    });
+    inst.openInstrumentCalibrationLab();
+    // Swap after construction — if captured, still sees 0.150
+    timingTol = 0.200;
+    const report = inst.getCalibrationReport();
+    assert.ok(report);
+    assert.equal(report.settings.timing_tolerance_s, 0.200,
+        'getTimingTolerance swap not reflected — value was captured at construction');
 });
