@@ -69,8 +69,12 @@ export function createAudioPipeline({
     pushRescueBuf,              // (newBuf, newEndT) — bass rescue buffer write-back
     resetLevelSamples,          // () — ndLevelSamples.length = 0
 
-    // ── Shared mutable array (main.js owns; matchNotes reads directly) ───
+    // ── Shared mutable state (main.js owns; matchNotes reads directly) ────
     ndLevelSamples,
+    bridgeNewOnsets,           // Map — module mutates, matchNotes reads
+    bridgeOnsetSeqSeen,        // Map — module mutates, matchNotes reads
+    getBridgeOnsetPrimed,      // () => bool — live accessor into main.js var
+    setBridgeOnsetPrimed,      // (bool) — write-back for matchNotes guard
 
     // ── Stable refs (never reassigned after construction) ────────────────
     matchNotes,
@@ -120,10 +124,9 @@ export function createAudioPipeline({
     let processingFrame  = false;
 
     // bridge onset tracking (reset on stopAudio)
+    // bridgeNewOnsets / bridgeOnsetSeqSeen / bridgeOnsetPrimed are SHARED with
+    // main.js (matchNotes reads them); they arrive via DI, not declared locally.
     let bridgeMlActive      = false;
-    let bridgeNewOnsets     = new Map();
-    let bridgeOnsetSeqSeen  = new Map();
-    let bridgeOnsetPrimed   = false;
 
     // stream health
     let _healthHandlers   = null;
@@ -546,7 +549,7 @@ export function createAudioPipeline({
                                     const prev = bridgeOnsetSeqSeen.get(n.midi);
                                     if (prev !== undefined && n.onsetSeq <= prev) continue;
                                     bridgeOnsetSeqSeen.set(n.midi, n.onsetSeq);
-                                    if (bridgeOnsetPrimed
+                                    if (getBridgeOnsetPrimed()
                                         && typeof n.confidence === 'number'
                                         && n.confidence >= confMin) {
                                         bridgeNewOnsets.set(n.midi, {
@@ -555,7 +558,7 @@ export function createAudioPipeline({
                                         });
                                     }
                                 }
-                                bridgeOnsetPrimed = true;
+                                setBridgeOnsetPrimed(true);
                                 let best = null;
                                 for (const n of detection.notes) {
                                     if (n && typeof n.midi === 'number'
@@ -728,9 +731,9 @@ export function createAudioPipeline({
         resetVerifierState();
 
         bridgeMlActive     = false;
-        bridgeOnsetSeqSeen = new Map();
-        bridgeNewOnsets    = new Map();
-        bridgeOnsetPrimed  = false;
+        bridgeOnsetSeqSeen.clear();
+        bridgeNewOnsets.clear();
+        setBridgeOnsetPrimed(false);
 
         if (worklet) {
             worklet.onaudioprocess = null;

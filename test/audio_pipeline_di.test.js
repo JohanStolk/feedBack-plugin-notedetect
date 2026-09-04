@@ -114,8 +114,12 @@ function makeDI(overrides = {}) {
         pushRescueBuf:             (buf, endT) => writes.rescueBufs.push({ buf, endT }),
         resetLevelSamples:         () => { writes.levelSampleResets++; },
         setNdVerifierChartSig:     () => {},
-        // ── shared array ────────────────────────────────────────────────────
+        // ── shared mutable state ────────────────────────────────────────────
         ndLevelSamples,
+        bridgeNewOnsets:            new Map(),
+        bridgeOnsetSeqSeen:         new Map(),
+        getBridgeOnsetPrimed:       () => false,
+        setBridgeOnsetPrimed:       () => {},
         // ── stable refs ─────────────────────────────────────────────────────
         matchNotes:                async () => {},
         diagCatalog:               { setDiagDetector: () => {}, getLiveSessionId: () => null },

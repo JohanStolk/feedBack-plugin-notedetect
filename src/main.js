@@ -3353,8 +3353,12 @@ function createNoteDetector(options = {}) {
         pushRescueBuf:             (buf, endT) => { _rescueBuf = buf; _rescueBufEndT = endT; },
         resetLevelSamples:         () => { _ndLevelSamples.length = 0; },
         setNdVerifierChartSig:     (v) => { _ndVerifierChartSig = v; },
-        // ── Shared mutable array ───────────────────────────────────────────
+        // ── Shared mutable state ──────────────────────────────────────────
         ndLevelSamples:            _ndLevelSamples,
+        bridgeNewOnsets:           bridgeNewOnsets,
+        bridgeOnsetSeqSeen:        bridgeOnsetSeqSeen,
+        getBridgeOnsetPrimed:      () => bridgeOnsetPrimed,
+        setBridgeOnsetPrimed:      (v) => { bridgeOnsetPrimed = v; },
         // ── Stable refs ───────────────────────────────────────────────────
         matchNotes,
         diagCatalog:               _diagCatalog,
