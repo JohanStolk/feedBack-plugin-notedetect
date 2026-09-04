@@ -204,12 +204,9 @@ test('getHw: null at construction, hw installed before enable(), _calDebug refle
     det.destroy();
 });
 
-// (b) DI-shape: fire song:ended → runAutoCalibrate() calls all 3 pre-sweep DI
-//     getters in order: getAutoCalibrate, getIsDefault, getDetectPreference.
-//     If getDetectPreference is deleted from DI (Creed r1 mutation 2), the
-//     song:ended handler throws TypeError and this test fails (RED).
-//     With correct DI: passes all guards, returns 'no window.setAvOffsetMs'
-//     (no sweep), done stays false (GREEN).
+// (b) DI-shape via pre-sweep guards: song:ended → runAutoCalibrate() reaches
+//     getDetectPreference() (3rd guard). Missing getter → TypeError → RED.
+//     With correct DI → guards pass, returns 'no window.setAvOffsetMs' → GREEN.
 test('DI-shape: song:ended drives runAutoCalibrate through getDetectPreference without throw', () => {
     const core = loadDetectionCore();
     const det = core.createNoteDetector({ isDefault: true });
@@ -223,5 +220,51 @@ test('DI-shape: song:ended drives runAutoCalibrate through getDetectPreference w
     );
     assert.equal(det._calState().done, false,
         'done stays false when setAvOffsetMs absent (sweep guard fires before _calDoneThisPlay = true)');
+    det.destroy();
+});
+
+// (c) DI-shape via completed sweep: exercises all 6 sweep-accessor DI params
+//     (getCurrentArrangement, getCurrentStringCount, getTuningOffsets, getCapo,
+//     getTimingHitThreshold, getPitchTolerance) plus calibrationNotes and
+//     calibrateOffsetMs. Creed r2: deleting getCapo kept all tests green.
+//
+//     Recipe: guitar string 0 fret 0 = E2 = MIDI 40; _calSeedForTest seeds m:40.
+//     At offset 0 ms all 12 detections land exactly at their note times → sweep
+//     returns {offsetMs:0, matched:12, total:12} → setAvOffsetMs called → done=true.
+//
+//     With any missing sweep accessor: TypeError during _ndCalibrateOffsetMs
+//     geometry construction or sweep → runAutoCalibrate returns early → done=false →
+//     assert fails (RED).
+test('DI-shape: completed sweep exercises all 6 sweep-accessor DI params (Creed r2 — getCapo)', () => {
+    const core = loadDetectionCore();
+    const sandboxRef = core._sandbox;
+
+    // Install setAvOffsetMs spy BEFORE creating detector (otherwise the setAvOffsetMs
+    // guard in runAutoCalibrate fires and the sweep never runs).
+    let calledWithMs;
+    sandboxRef.setAvOffsetMs = (ms) => { calledWithMs = ms; };
+
+    const det = core.createNoteDetector({ isDefault: true });
+
+    // 12 chart notes: guitar string 0 fret 0 → MIDI 40 (matches seeded m:40).
+    // hw already present (standard loadDetectionCore), so hw is non-null; override
+    // getFilteredNotes so _ndCalibrationNotes() returns these 12 notes.
+    const chartNotes = Array.from({ length: 12 }, (_, i) => ({ t: i, s: 0, f: 0 }));
+    core.highway.getFilteredNotes = () => chartNotes;
+
+    // Seed 12 detections: { bt:i, m:40 } for i=0..11. At offset 0 ms:
+    //   bt + 0 = i = note.t → matched; |_ndNearestOctaveCents(40,40)|=0 < 50 cents.
+    det._calSeedForTest(12);
+
+    // Fire the sweep directly (no audio pipeline needed).
+    det._runAutoCalibrate();
+
+    // If any sweep DI accessor is missing (e.g. getCapo deleted): calibrateOffsetMs
+    // throws TypeError building the geom object → caught → done stays false → RED.
+    assert.equal(det._calState().done, true,
+        'sweep must complete: _calDoneThisPlay=true after a 12/12 note match');
+    assert.equal(typeof calledWithMs, 'number',
+        'setAvOffsetMs must be called with a number (sweep result.offsetMs)');
+
     det.destroy();
 });
