@@ -13,20 +13,22 @@
 // Revert → green.
 //
 // 20 DI params total:
-//   TESTED HERE (8 live accessors):
+//   TESTED HERE (9 live accessors):
 //     getEnabled, getDiagCatalog, getTuningMode, getAutoRecord,
-//     getDetectPreference, getHw, getUsingDesktopBridge, getSelectedDeviceId
+//     getDetectPreference, getHw, getUsingDesktopBridge, getSelectedDeviceId,
+//     getSummaryUi
 //
-//   HONEST GAPS (8 live accessors — getUserMedia or full song:ended chain):
+//   HONEST GAPS (8 live accessors):
 //     getSelectedChannel   — read only inside _startParallelTrainingCapture()
-//                            after getUserMedia succeeds (needs a live MediaStream).
-//     getInputGain         — same; both are captured inside onaudioprocess closure
-//                            that executes only once the stream+AudioContext are live.
+//                            after AudioContext construction succeeds (needs a live
+//                            MediaStream + working AudioContext).
+//     getInputGain         — same; both are captured inside the onaudioprocess
+//                            closure, which only executes once AudioContext and the
+//                            ScriptProcessor node are live.
 //     getCurrentFilename   — read inside _buildAndUploadTrainingBundle() which
 //                            is called asynchronously from _recOnEnded; wiring
 //                            the full chain requires mocking fetch, _showTrainingConsentModal,
 //                            and the slopsmith event system in strict serialisation.
-//     getSummaryUi         — called in _recOnEnded after save; same chain.
 //     getDetectionMethod, getLatencyOffset, getTimingTolerance,
 //     getTimingHitThreshold, getPitchTolerance — all read inside the training-
 //                            bundle metadata builder (_buildAndUploadTrainingBundle).
@@ -336,4 +338,30 @@ test('getSelectedDeviceId() live: _startParallelTrainingCapture passes swapped d
         'device-B',
         'must pass swapped deviceId device-B (live read)',
     );
+});
+
+// 9. getSummaryUi() — read live in the no-chunks branch of song:ended (recording-capture.js:1102).
+//    Path: armRecording() → song:ended fires with no injected chunks → else-if(_recArmed) branch →
+//    getSummaryUi().runDeferredSummary() synchronously. No fetch, no AudioContext required.
+//    (The getSummaryUi() call in the training-upload finally-block at line 1083 remains a
+//    genuine gap — that path requires the full async save+upload chain.)
+test('getSummaryUi() live: no-chunks song:ended branch calls runDeferredSummary on swapped UI', () => {
+    const { createRecordingCapture, emit } = loadModule();
+    let callA = 0, callB = 0;
+    const uiA = { runDeferredSummary: () => callA++ };
+    const uiB = { runDeferredSummary: () => callB++ };
+    let summaryUi = uiA;
+
+    const rec = createRecordingCapture(makeAcc({ getSummaryUi: () => summaryUi }));
+    rec.armRecording();
+    // No chunks — _recChunks stays empty.
+
+    // Swap BEFORE the event fires.
+    summaryUi = uiB;
+    emit('song:ended');  // synchronous — _recOnEnded runs inline
+
+    assert.equal(callA, 0,
+        'original summaryUi.runDeferredSummary must not be called after swap');
+    assert.equal(callB, 1,
+        'swapped summaryUi.runDeferredSummary must be called (live read)');
 });
