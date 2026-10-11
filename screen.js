@@ -280,10 +280,12 @@ function _ndTrackMatchesFilename(track, lowerFn) {
         .some((m) => base === String(m).toLowerCase());
 }
 
+// Same exact-basename rule as the catalog match, so the playSong wrapper and
+// _getDiagnosticTrackForSession agree on what counts as the diagnostic pack.
 function _ndFilenameLooksDiagnostic(fn) {
-    const lower = String(fn || '').toLowerCase();
-    if (!lower) return false;
-    return _ND_DIAGNOSTIC_FILENAME_MARKERS.some((m) => lower.includes(m));
+    return _ndTrackMatchesFilename(
+        { filenameIncludes: _ND_DIAGNOSTIC_FILENAME_MARKERS },
+        String(fn || '').toLowerCase());
 }
 
 // Escape untrusted text before interpolating into an innerHTML string.

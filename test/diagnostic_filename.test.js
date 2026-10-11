@@ -24,6 +24,9 @@ test('ordinary songs are not diagnostic tracks', () => {
     assert.strictEqual(filenameLooksDiagnostic('Uriah Heep - Shadows Of Grief.feedpak'), false);
     assert.strictEqual(filenameLooksDiagnostic(''), false);
     assert.strictEqual(filenameLooksDiagnostic(null), false);
+    // Look-alikes are not the diagnostic pack (same rule as the catalog match).
+    assert.strictEqual(filenameLooksDiagnostic('my-feedBack-diagnostic-basic-guitar.sloppak'), false);
+    assert.strictEqual(filenameLooksDiagnostic('feedBack-diagnostic-basic-guitar.sloppak.bak'), false);
 });
 
 test('the launcher points at the pack core seeds today', () => {
