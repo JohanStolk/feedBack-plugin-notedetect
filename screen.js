@@ -264,7 +264,10 @@ function _ndSyncMlGate(token, wantsMl, audio) {
     } catch (_) { /* downlevel / transient — leave state so a later sync retries */ }
 }
 
+// Lowercase — compared against the lowercased filename. Core renamed the
+// seeded pack to feedBack-… (#900); keep the legacy name for older libraries.
 const _ND_DIAGNOSTIC_FILENAME_MARKERS = [
+    'feedback-diagnostic-basic-guitar.sloppak',
     'slopsmith-diagnostic-basic-guitar.sloppak',
 ];
 
@@ -16777,11 +16780,13 @@ function createNoteDetector(options = {}) {
     const _DIAGNOSTIC_TRACK_CATALOG = [
         {
             id: 'basic-guitar-6',
-            title: 'Slopsmith Diagnostic — Basic Guitar',
-            artist: 'Slopsmith',
+            // Core seeds this as feedBack-diagnostic-… (#900; formerly
+            // slopsmith-diagnostic-…). The filename match covers both names.
+            title: 'FeedBack Diagnostic — Basic Guitar',
+            artist: 'FeedBack',
             arrangement: 'Diagnostic Guitar',
-            filenameIncludes: 'slopsmith-diagnostic-basic-guitar.sloppak',
-            dlcRelativePath: 'diagnostics-builtin/slopsmith-diagnostic-basic-guitar.sloppak',
+            filenameIncludes: 'diagnostic-basic-guitar.sloppak',
+            dlcRelativePath: 'diagnostics-builtin/feedBack-diagnostic-basic-guitar.sloppak',
             instrument: 'guitar',
             stringCount: 6,
             reportProfile: 'basic-guitar-v1',
