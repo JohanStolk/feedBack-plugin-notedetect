@@ -271,12 +271,13 @@ const _ND_DIAGNOSTIC_FILENAME_MARKERS = [
     'slopsmith-diagnostic-basic-guitar.sloppak',
 ];
 
-// True when a lowercased filename contains one of the track's pack names.
-// filenameIncludes is a string or a list of names.
+// True when a lowercased (already URI-decoded) filename's basename is exactly
+// one of the track's pack names. filenameIncludes is a string or a list.
 function _ndTrackMatchesFilename(track, lowerFn) {
     if (!track || !track.filenameIncludes || !lowerFn) return false;
+    const base = String(lowerFn).split(/[\\/]/).pop();
     return [].concat(track.filenameIncludes)
-        .some((m) => lowerFn.includes(String(m).toLowerCase()));
+        .some((m) => base === String(m).toLowerCase());
 }
 
 function _ndFilenameLooksDiagnostic(fn) {

@@ -40,6 +40,9 @@ test('the catalog matches only the two real pack names, not any similar suffix',
     assert.strictEqual(trackMatchesFilename(track,
         'diagnostics-builtin/slopsmith-diagnostic-basic-guitar.sloppak'), true);
     assert.strictEqual(trackMatchesFilename(track, 'my-own-diagnostic-basic-guitar.sloppak'), false);
+    assert.strictEqual(trackMatchesFilename(track, 'my-feedback-diagnostic-basic-guitar.sloppak'), false);
+    assert.strictEqual(trackMatchesFilename(track, 'feedback-diagnostic-basic-guitar.sloppak'), true);
+    assert.strictEqual(trackMatchesFilename(track, 'sub\\dir\\slopsmith-diagnostic-basic-guitar.sloppak'), true);
     assert.strictEqual(trackMatchesFilename(track, ''), false);
     assert.strictEqual(trackMatchesFilename({ filenameIncludes: 'x.sloppak' }, 'a/x.sloppak'), true);
 });
