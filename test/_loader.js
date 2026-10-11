@@ -254,6 +254,7 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
     return {
         yinDetect: rewrapYin(sandbox._ndYinDetect),
         filenameLooksDiagnostic: sandbox._ndFilenameLooksDiagnostic,
+        trackMatchesFilename: sandbox._ndTrackMatchesFilename,
         hpsDetect: rewrapYin(sandbox._ndHpsDetect),
         freqToMidi: sandbox._ndFreqToMidi,
         midiFromStringFret: midiFromStringFretWrapped,

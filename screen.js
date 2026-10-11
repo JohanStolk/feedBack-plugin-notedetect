@@ -271,6 +271,14 @@ const _ND_DIAGNOSTIC_FILENAME_MARKERS = [
     'slopsmith-diagnostic-basic-guitar.sloppak',
 ];
 
+// True when a lowercased filename contains one of the track's pack names.
+// filenameIncludes is a string or a list of names.
+function _ndTrackMatchesFilename(track, lowerFn) {
+    if (!track || !track.filenameIncludes || !lowerFn) return false;
+    return [].concat(track.filenameIncludes)
+        .some((m) => lowerFn.includes(String(m).toLowerCase()));
+}
+
 function _ndFilenameLooksDiagnostic(fn) {
     const lower = String(fn || '').toLowerCase();
     if (!lower) return false;
@@ -16781,11 +16789,11 @@ function createNoteDetector(options = {}) {
         {
             id: 'basic-guitar-6',
             // Core seeds this as feedBack-diagnostic-… (#900; formerly
-            // slopsmith-diagnostic-…). The filename match covers both names.
+            // slopsmith-diagnostic-…). Match exactly those two pack names.
             title: 'FeedBack Diagnostic — Basic Guitar',
             artist: 'FeedBack',
             arrangement: 'Diagnostic Guitar',
-            filenameIncludes: 'diagnostic-basic-guitar.sloppak',
+            filenameIncludes: _ND_DIAGNOSTIC_FILENAME_MARKERS,
             dlcRelativePath: 'diagnostics-builtin/feedBack-diagnostic-basic-guitar.sloppak',
             instrument: 'guitar',
             stringCount: 6,
@@ -16839,8 +16847,7 @@ function createNoteDetector(options = {}) {
         if (!diagFn) return;
         const prevLower = prevFn.toLowerCase();
         if (prevLower === diagFn.toLowerCase()) return;
-        if (track.filenameIncludes
-            && prevLower.includes(String(track.filenameIncludes).toLowerCase())) {
+        if (_ndTrackMatchesFilename(track, prevLower)) {
             return;
         }
         const hw = resolveHw();
@@ -17004,8 +17011,7 @@ function createNoteDetector(options = {}) {
         const currentHw = resolveHw();
         const info = (currentHw && currentHw.getSongInfo) ? currentHw.getSongInfo() : {};
         for (const track of _DIAGNOSTIC_TRACK_CATALOG) {
-            if (track.filenameIncludes
-                && fn.includes(String(track.filenameIncludes).toLowerCase())) {
+            if (_ndTrackMatchesFilename(track, fn)) {
                 return track;
             }
         }

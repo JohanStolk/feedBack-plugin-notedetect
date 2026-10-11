@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { loadDetectionCore } = require('./_loader');
 
-const { filenameLooksDiagnostic } = loadDetectionCore();
+const { filenameLooksDiagnostic, trackMatchesFilename } = loadDetectionCore();
 
 test('current core name (feedBack-…) is a diagnostic track', () => {
     assert.strictEqual(
@@ -30,4 +30,21 @@ test('the launcher points at the pack core seeds today', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'screen.js'), 'utf8');
     assert.match(src,
         /dlcRelativePath: 'diagnostics-builtin\/feedBack-diagnostic-basic-guitar\.sloppak'/);
+});
+
+test('the catalog matches only the two real pack names, not any similar suffix', () => {
+    const track = { filenameIncludes: ['feedback-diagnostic-basic-guitar.sloppak',
+        'slopsmith-diagnostic-basic-guitar.sloppak'] };
+    assert.strictEqual(trackMatchesFilename(track,
+        'diagnostics-builtin/feedback-diagnostic-basic-guitar.sloppak'), true);
+    assert.strictEqual(trackMatchesFilename(track,
+        'diagnostics-builtin/slopsmith-diagnostic-basic-guitar.sloppak'), true);
+    assert.strictEqual(trackMatchesFilename(track, 'my-own-diagnostic-basic-guitar.sloppak'), false);
+    assert.strictEqual(trackMatchesFilename(track, ''), false);
+    assert.strictEqual(trackMatchesFilename({ filenameIncludes: 'x.sloppak' }, 'a/x.sloppak'), true);
+});
+
+test('the catalog entry reuses the two filename markers', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'screen.js'), 'utf8');
+    assert.match(src, /filenameIncludes: _ND_DIAGNOSTIC_FILENAME_MARKERS,/);
 });
